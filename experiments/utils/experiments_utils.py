@@ -20,6 +20,13 @@ def cache_path(problem: str) -> Path:
     """generate the cache file path for the dataset"""
     return CACHE_DIR / f"{problem}_ds3m_forecast.npz"
 
+def _np_default(obj):
+    import numpy as np
+    if isinstance(obj, (np.floating, np.integer)):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    raise TypeError(f"Type not serializable: {type(obj)}")
 
 def save_forecast(result_dict: dict, problem: str) -> None:
     path = cache_path(problem)
@@ -31,7 +38,7 @@ def save_forecast(result_dict: dict, problem: str) -> None:
         d_argmax=result_dict.get("d_argmax"),
         y_uq=result_dict.get("y_uq"),
         y_lq=result_dict.get("y_lq"),
-        res_metric=json.dumps(result_dict.get("res_metric", {})),
+        res_metric=json.dumps(result_dict.get("res_metric", {}), default=_np_default),
         figdirectory=result_dict.get("figdirectory", None),
         d_dim=result_dict.get("d_dim", None),
         predict_dim=result_dict.get("predict_dim", None),

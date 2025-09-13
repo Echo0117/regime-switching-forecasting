@@ -47,7 +47,7 @@ def main() -> None:
         "--train_size", type=int, default=100, help="T0 used as calibration size for ACP"
     )
     parser.add_argument(
-        "--force_new", action="store_true", help="Ignore cache and recompute forecast"
+        "--force_new", default=True, action="store_true", help="Ignore cache and recompute forecast"
     )
     args = parser.parse_args()
     print(args)

@@ -642,6 +642,7 @@ class DS3MWrapper:
             # 2) one-step prediction on the test block
             res, testForecast_mean, testOriginal, size, d_argmax, uq, lq = forecast(
                 model,
+                ds["X_all_s"], ds["y_all_s"], ds["train_end"],
                 ds["testX"], ds["testY"],
                 ds["moments"], ds["d_dim"],
                 ds["means"], ds["trend"],

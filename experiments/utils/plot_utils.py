@@ -123,6 +123,21 @@ def plot_results_with_aci(
             aci_upper = _safe_trim(aci_upper, test_len)
             tt_test = tt_test[: len(aci_upper)]
 
+        N_test = len(y_true_1d)          # == len(y_pred_1d) == len(aci_upper)
+        T0 = 0
+        T  = N_test
+        tt_test = np.arange(N_test)
+
+        print(f"[PLOT] ACI on test split t={T0}..{T-1} (len={len(tt_test)}), {tt_test.tolist()}")
+        print(f"       y_true[{T0}:{T}]={y_true_1d[T0:T]}")
+        print(f"       y_pred[{T0}:{T}]={y_pred_1d[T0:T]}")
+        print(f"       aci_upper[:{N_test}]={aci_upper}")
+
+        # print(f"[PLOT] ACI on test split t={T0}..{T-1} (len={len(tt_test)}), {tt_test}")
+        # print(f"       y_true[{T0}:{T0+len(tt_test)}]  y_pred[{T0}:{T0+len(tt_test)}], {y_pred_1d[T0 : T0 + len(tt_test)]}")
+        # print(f"       y_pred[{T0}:{T0+len(tt_test)}]={y_true_1d[T0 : T0 + len(tt_test)]}")
+        # print(f"       aci_upper[:{len(tt_test)}]={aci_upper}") 
+        
         # Overlay True + Pred on test window
         plt.plot(tt_test, y_true_1d[T0 : T0 + len(tt_test)], color="black", lw=1.0, label="True (test)")
         plt.plot(tt_test, y_pred_1d[T0 : T0 + len(tt_test)], color="tab:blue", lw=1.2, label="Pred")

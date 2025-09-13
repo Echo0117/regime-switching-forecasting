@@ -1,18 +1,18 @@
 # %%
 import warnings
 import os
-import copy
 import numpy as np
 import random
 import pandas as pd
 import matplotlib.pyplot as plt
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 import time
 import matplotlib
-import argparse
 from pathlib import Path
 import os, sys
 
+
+from experiments.config import config
+from experiments.utils.pernod_loader import DataPreprocessing, create_dataset_exog_only, make_exog_windows_seq_target, standardize_X_by_train
 HERE = os.path.dirname(__file__)
 PROJ_ROOT = os.path.abspath(os.path.join(HERE, ".."))
 if PROJ_ROOT not in sys.path:
@@ -25,11 +25,10 @@ CACHE_DIR.mkdir(exist_ok=True)
 
 from Deep_Switching_State_Space_Model.src.DSSSMCode import *
 from Deep_Switching_State_Space_Model.src.utils import *
-import torch.utils.data
-import torch.utils
 import torch
 import seaborn as sns
 import matplotlib
+
 
 matplotlib.use("Agg")  # Set backend before importing pyplot
 warnings.filterwarnings("ignore")
@@ -41,15 +40,16 @@ def load_ds3m_data(args):
     remove_residual = False
     longterm = False
     bidirection = False
-
-    if args.seed is not None:
-        os.environ["PYTHONHASHSEED"] = str(args.seed)
-        random.seed(args.seed)
-        np.random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        torch.cuda.manual_seed_all(args.seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+    
+    import numpy as np
+    args.seed=42
+    os.environ["PYTHONHASHSEED"] = str(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     # %%
     dataname = args.problem
@@ -295,6 +295,78 @@ def load_ds3m_data(args):
         RawDataOriginal = RawDataOriginal["Load"].values
         RawDataOriginal = RawDataOriginal.reshape(-1, 1, predict_dim)
 
+    
+    # %%
+    # if dataname == "Pernod":
+    #     freq = 1
+    #     timestep = 14
+    #     test_len = 30
+    #     predict_dim = 1
+    #     h_dim = predict_dim  # Dimension of the hidden states in RNN
+    #     z_dim = 10  # Dimension of the latent variable z
+    #     d_dim = 2  # Dimension of the latent variable d
+    #     n_layers = 1  # Number of the layers of the RNN
+    #     clip = 10  # Gradient clips
+    #     learning_rate = 1e-3  # Learning rate
+
+    #     DataPath = "Deep_Switching_State_Space_Model/data/Pernod/pernod.csv"
+
+    #     data_preprocessing = DataPreprocessing(
+    #         DataPath,
+    #         config["dataset"]["brand"],
+    #         config["dataset"]["dependent_variable"],
+    #         config["dataset"]["independent_variables_X"],
+    #         config["dataset"]["independent_variables_Z"],
+    #     )
+
+    #     _, _, RawDataOriginal = data_preprocessing.preprocess(normalization=True)
+        
+    #     # RawDataOriginal = RawDataOriginal["volume_so"].values
+        
+    #     x_dim = len(config["dataset"]["independent_variables_Z"])  # Dimension of x
+    #     y_dim = predict_dim  # Dimension of y #equal to predict_len
+
+    #     RawDataOriginal = RawDataOriginal.reshape(-1, 1, predict_dim)
+    if dataname == "Pernod":
+        freq = 1
+        timestep = 1
+        test_len = 30
+        predict_dim = 1   # 仍然单变量预测 Y
+        y_dim = predict_dim
+
+        # 读取并做预处理（建议 normalization=True，让 X/Z/Y 都在同一归一化空间）
+        DataPath = "Deep_Switching_State_Space_Model/data/Pernod/pernod.csv"
+        data_preprocessing = DataPreprocessing(
+            DataPath,
+            config["dataset"]["brand"],
+            config["dataset"]["dependent_variable"],
+            config["dataset"]["independent_variables_X"],  # 控制变量X
+            config["dataset"]["independent_variables_Z"],  # 营销变量Z
+        )
+        X_t, Z_t, Y_t = data_preprocessing.preprocess(normalization=True)  # -> numpy
+
+        # -------- 只用外生特征作为输入，不包含任何 y 的滞后 --------
+        # 如果没有 X 或 Z，替换为 shape=(T,0) 的空数组并在后面报错更友好
+        import numpy as np
+        X_t = np.asarray(X_t, dtype=np.float32) if X_t is not None else np.zeros((len(Y_t), 0), np.float32)
+        Z_t = np.asarray(Z_t, dtype=np.float32) if Z_t is not None else np.zeros((len(Y_t), 0), np.float32)
+        inp = np.concatenate([X_t, Z_t], axis=1)  # (T, n_x+n_z)
+        if inp.shape[1] == 0:
+            raise ValueError("No exogenous features found. Provide X/Z columns to run exogenous-only forecasting.")
+
+        x_dim = inp.shape[1]      # 输入维度 = 外生特征维数
+        h_dim = max(16, min(64, x_dim * 2))  # 隐层可按需调整
+        z_dim = 10
+        d_dim = 2
+        n_layers = 1
+        clip = 10
+        learning_rate = 1e-3
+
+        # 目标 Y（注意：不把 Y 拼进输入）
+        y_vec = np.asarray(Y_t, dtype=np.float32).reshape(-1)      # (T,)
+        RawDataOriginal = y_vec.reshape(-1, 1, 1)                   # (T,1,1) 只用于后续评估/画图
+
+
     # %%
     if remove_mean:
         means = np.expand_dims(
@@ -340,34 +412,126 @@ def load_ds3m_data(args):
         valid_data = data[(train_len) : (train_len + valid_len)]
         test_data = data[(-test_len - timestep - 1) : -1]
 
-    # %%
-    # Normalize the dataset
-    moments = normalize_moments(train_data)
-    train_data = normalize_fit(train_data, moments)
-    valid_data = normalize_fit(valid_data, moments)
-    test_data = normalize_fit(test_data, moments)
+    
+    if dataname == "Pernod":
+        # Split indices: keep the same policy as before: (train+valid) then fixed test_len
+        N = len(y_vec)
+        train_end = N - test_len                 # end of train+valid block
+        length = train_end
+        train_len = int(length * 0.75)
+        valid_len = length - train_len
+        assert train_len + valid_len == train_end
 
-    # Create training and test dataset
-    trainX, trainY = create_dataset2(train_data, timestep)
-    validX, validY = create_dataset2(valid_data, timestep)
-    testX, testY = create_dataset2(test_data, timestep)
+        # Normalize y using moments from train only; apply to full y
+        moments = normalize_moments(y_vec[:train_len])
+        y_all_s = normalize_fit(y_vec, moments)               # (N,)
 
-    trainX = np.transpose(trainX, (1, 0, 2))
-    validX = np.transpose(validX, (1, 0, 2))
-    testX = np.transpose(testX, (1, 0, 2))
-    print("3D size(X):", trainX.shape, validX.shape, testX.shape)
+        # Standardize X using stats from [0:train_end), apply to full X
+        X_all_s, x_mu, x_sd = standardize_X_by_train(inp, train_end)  # (N, x_dim)
 
-    trainY = np.transpose(trainY, (1, 0, 2))
-    validY = np.transpose(validY, (1, 0, 2))
-    testY = np.transpose(testY, (1, 0, 2))
-    print("3D size(Y):", trainY.shape, validY.shape, testY.shape)
+        # Build windows inside each partition
+        trX, trY = make_exog_windows_seq_target(X_all_s, y_all_s, timestep, 0,            train_len)
+        vaX, vaY = make_exog_windows_seq_target(X_all_s, y_all_s, timestep, train_len,    train_end)
+        teX, teY = make_exog_windows_seq_target(X_all_s, y_all_s, timestep, train_end,    N)
 
-    trainX = torch.from_numpy(trainX).float()
-    validX = torch.from_numpy(validX).float()
-    testX = torch.from_numpy(testX).float()
-    trainY = torch.from_numpy(trainY).float()
-    validY = torch.from_numpy(validY).float()
-    testY = torch.from_numpy(testY).float()
+        # Move to (seq_len, batch, feat) and (1, batch, 1)
+        def to_model_axes(X_win, Y_win):
+            if X_win.shape[0] == 0:
+                X_torch = torch.empty((timestep, 0, x_dim), dtype=torch.float32)
+                Y_torch = torch.empty((1, 0, 1), dtype=torch.float32)
+                return X_torch, Y_torch
+            X_win = np.transpose(X_win, (1, 0, 2))          # (k, B, x_dim)
+            Y_win = Y_win.reshape(-1, 1, 1)                 # (B,1,1)
+            Y_win = np.transpose(Y_win, (1, 0, 2))          # (1, B, 1)
+            return torch.from_numpy(X_win).float(), torch.from_numpy(Y_win).float()
+
+        trainX, trainY = to_model_axes(trX, trY)
+        validX, validY = to_model_axes(vaX, vaY)
+        testX,  testY  = to_model_axes(teX, teY)
+
+        # Device placement
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        trainX = trainX.to(device); trainY = trainY.to(device)
+        validX = validX.to(device); validY = validY.to(device)
+        testX  = testX.to(device);  testY  = testY.to(device)
+
+        # # Prepare common returns used elsewhere
+        # directoryBest = os.path.join("Deep_Switching_State_Space_Model", "results", "checkpoints", dataname)
+        # figdirectory = os.path.join("figures")
+        # os.makedirs(directoryBest, exist_ok=True)
+        # os.makedirs(figdirectory, exist_ok=True)
+        # figdirectory = f"{figdirectory}/{dataname}_"
+
+        # # 与原来一致的切分策略
+        # length = len(y_vec) - test_len
+        # train_len = int(length * 0.75)
+        # valid_len = int(length * 0.25)
+
+        # train_in  = inp[:train_len]
+        # valid_in  = inp[train_len:train_len+valid_len]
+        # test_in   = inp[(-test_len - timestep - 1) : -1]
+
+        # train_y   = y_vec[:train_len]
+        # valid_y   = y_vec[train_len:train_len+valid_len]
+        # test_y    = y_vec[(-test_len - timestep - 1) : -1]
+        # # # 只对 y 做 normalize_moments/normalize_fit（保持和你现有评估一致）
+        # moments = normalize_moments(train_y)
+        # train_y_n = normalize_fit(train_y, moments)
+        # valid_y_n = normalize_fit(valid_y, moments)
+        # test_y_n  = normalize_fit(test_y,  moments)
+        # # train_y_n = train_y
+        # # valid_y_n = valid_y
+        # # test_y_n  = test_y
+        # trainX, trainY = make_exog_windows_seq_target(train_in, train_y_n, timestep, stride=1)
+        # validX, validY = make_exog_windows_seq_target(valid_in, valid_y_n, timestep, stride=1)
+        # testX,  testY  = make_exog_windows_seq_target(test_in,  test_y_n,  timestep, stride=1)
+
+        # # 转置到 (seq_len, batch, feat) 以匹配你现有的模型训练接口
+        # trainX = np.transpose(trainX, (1, 0, 2))
+        # validX = np.transpose(validX, (1, 0, 2))
+        # testX  = np.transpose(testX,  (1, 0, 2))
+
+        # trainY = np.transpose(trainY, (1, 0, 2))
+        # validY = np.transpose(validY, (1, 0, 2))
+        # testY  = np.transpose(testY,  (1, 0, 2))
+
+        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # trainX = torch.from_numpy(trainX).float().to(device)
+        # validX = torch.from_numpy(validX).float().to(device)
+        # testX  = torch.from_numpy(testX ).float().to(device)
+        # trainY = torch.from_numpy(trainY).float().to(device)
+        # validY = torch.from_numpy(validY).float().to(device)
+        # testY  = torch.from_numpy(testY ).float().to(device)
+
+        # %%
+    else:
+        # Normalize the dataset
+        moments = normalize_moments(train_data)
+        train_data = normalize_fit(train_data, moments)
+        valid_data = normalize_fit(valid_data, moments)
+        test_data = normalize_fit(test_data, moments)
+
+        # Create training and test dataset
+        trainX, trainY = create_dataset2(train_data, timestep)
+        validX, validY = create_dataset2(valid_data, timestep)
+        testX, testY = create_dataset2(test_data, timestep)
+
+        trainX = np.transpose(trainX, (1, 0, 2))
+        validX = np.transpose(validX, (1, 0, 2))
+        testX = np.transpose(testX, (1, 0, 2))
+        print("3D size(X):", trainX.shape, validX.shape, testX.shape)
+
+        trainY = np.transpose(trainY, (1, 0, 2))
+        validY = np.transpose(validY, (1, 0, 2))
+        testY = np.transpose(testY, (1, 0, 2))
+        print("3D size(Y):", trainY.shape, validY.shape, testY.shape)
+
+        trainX = torch.from_numpy(trainX).float()
+        validX = torch.from_numpy(validX).float()
+        testX = torch.from_numpy(testX).float()
+        trainY = torch.from_numpy(trainY).float()
+        validY = torch.from_numpy(validY).float()
+        testY = torch.from_numpy(testY).float()
 
     # %%
     directoryBest = os.path.join(
@@ -423,6 +587,10 @@ def load_ds3m_data(args):
         "data": data,
         "z_true": z_true if dataname == "Lorenz" else None,
         "learning_rate": learning_rate,
+        
+        "X_all_s": X_all_s if X_all_s is not None else None,      # np.ndarray shape (N, x_dim) standardized
+        "y_all_s": y_all_s if y_all_s is not None else None,      # np.ndarray shape (N,)   standardized
+        "train_end": train_end if train_end is not None else None  # int, e.g. N - test_len
     }
 
 
@@ -430,11 +598,13 @@ def load_ds3m_data(args):
 # Training
 start = time.time()
 
-
 def forecast(
     model,
-    testX,
-    testY,
+    X_all_s,
+    y_all_s,
+    train_end,
+    testX,              # kept for API compatibility; not used by exog-only path
+    testY,              # kept for API compatibility; only used for size/moments invert
     moments,
     d_dim,
     means,
@@ -444,71 +614,177 @@ def forecast(
     RawDataOriginal,
     remove_mean=False,
     remove_residual=False,
-    forecaststep=1,
+    forecaststep=1,     # ignored for multi-step; we use test_len
     MC_S=200,
 ):
+    import numpy as np
+    import torch
 
+    device = next(model.parameters()).device
+
+    # Slice history / future (numpy) -> torch with expected shapes
+    x_hist_np = X_all_s[:train_end]                          # (T_hist, x_dim)
+    y_hist_np = y_all_s[:train_end]                          # (T_hist,)
+    x_fut_np  = X_all_s[train_end : train_end + test_len]    # (H, x_dim)
+
+    x_hist = torch.tensor(x_hist_np, dtype=torch.float32, device=device).unsqueeze(1)   # (T_hist,1,x_dim)
+    y_hist = torch.tensor(y_hist_np, dtype=torch.float32, device=device).reshape(-1,1,1) # (T_hist,1,1)
+    x_fut  = torch.tensor(x_fut_np,  dtype=torch.float32, device=device).unsqueeze(1)   # (H,1,x_dim)
+
+    # Run multi-step exogenous-only forecast
     forecast_MC, forecast_d_MC, forecast_z_MC = model._forecastingMultiStep(
-        testX, testY, forecaststep, MC_S
+        x_hist, y_hist, step=test_len, S=MC_S, x_fut=x_fut
     )
+    # forecast_MC: (S, step, B, y_dim) with B=1, y_dim=1 in your setup
 
-    if forecaststep == 1:
-        all_testForecast = normalize_invert(
-            forecast_MC.squeeze(1).transpose(1, 0, 2), moments
-        )
-    else:
-        all_testForecast = normalize_invert(
-            forecast_MC.squeeze(2).transpose(1, 0, 2), moments
-        )
+    # Monte Carlo mean -> (step, B, y_dim)
+    y_pred_s = forecast_MC.mean(axis=0)          # (step, 1, 1)
 
-    testY_inversed = normalize_invert(testY.cpu().numpy().transpose(1, 0, 2), moments)
-    size = testY_inversed.shape[0]
+    # Invert normalization to original y space -> (step, 1, 1)
+    y_pred_inv = normalize_invert(y_pred_s, moments)
 
-    forecast_d_MC_argmax = []
-    for i in range(d_dim):
-        forecast_d_MC_argmax.append(np.sum(forecast_d_MC[:, -1, :, :] == i, axis=0))
-    forecast_d_MC_argmax = np.argmax(np.array(forecast_d_MC_argmax), axis=0).reshape(-1)
+    # For convenience, collapse (step, 1, 1) -> (step, 1)
+    testForecast_mean = y_pred_inv.reshape(test_len, -1)
 
+    # Also compute 5%/95% quantiles across MC -> (step, 1, 1) -> (step, 1)
+    testForecast_uq = normalize_invert(np.quantile(forecast_MC, 0.95, axis=0), moments).reshape(test_len, -1)
+    testForecast_lq = normalize_invert(np.quantile(forecast_MC, 0.05, axis=0), moments).reshape(test_len, -1)
+
+    # Discrete state summary: take the last step’s most likely d across MC paths
+    # forecast_d_MC shape depends on your implementation; this is a robust fallback:
+    # try to read the last future-step samples and pick the mode across MC.
+    try:
+        # Example expected shape: (S, T_total, B, 1) of state indices
+        last_d_samples = forecast_d_MC[:, -1, :, :].astype(int).squeeze(-1).squeeze(-1)  # (S,)
+        # Mode across MC
+        vals, counts = np.unique(last_d_samples, return_counts=True)
+        d_mode = vals[np.argmax(counts)]
+        forecast_d_MC_argmax = np.array([d_mode], dtype=int)  # (B=1,)
+    except Exception:
+        # Fallback: zeros if the structure differs
+        forecast_d_MC_argmax = np.zeros((1,), dtype=int)
+
+    # Build ground truth segment for evaluation in original space: (test_len, y_dim)
+    testOriginal = RawDataOriginal[-int(test_len / freq):, :, :].reshape(-1, RawDataOriginal.shape[2])
+
+    # Optionally add back mean/trend if your pipeline removed them
     if remove_mean:
-        testForecast_mean = np.mean(all_testForecast, axis=1) + np.tile(
-            means[0, :, :], (int(test_len / freq), 1)
-        )
-        testForecast_uq = np.quantile(all_testForecast, 0.95, axis=1) + np.tile(
-            means[0, :, :], (int(test_len / freq), 1)
-        )
-        testForecast_lq = np.quantile(all_testForecast, 0.05, axis=1) + np.tile(
-            means[0, :, :], (int(test_len / freq), 1)
-        )
-    elif remove_residual:
-        testForecast_mean = np.mean(all_testForecast, axis=1) + trend[-test_len:, :]
-        testForecast_uq = (
-            np.quantile(all_testForecast, 0.95, axis=1) + trend[-test_len:, :]
-        )
-        testForecast_lq = (
-            np.quantile(all_testForecast, 0.05, axis=1) + trend[-test_len:, :]
-        )
-    else:
-        testForecast_mean = np.mean(all_testForecast, axis=1)
-        testForecast_uq = np.quantile(all_testForecast, 0.95, axis=1)
-        testForecast_lq = np.quantile(all_testForecast, 0.05, axis=1)
+        add_back = np.tile(means[0, :, :], (int(test_len / freq), 1))
+        testForecast_mean = testForecast_mean + add_back
+        testForecast_uq   = testForecast_uq   + add_back
+        testForecast_lq   = testForecast_lq   + add_back
+    elif remove_residual and trend is not None:
+        add_back = trend[-test_len:, :]
+        testForecast_mean = testForecast_mean + add_back
+        testForecast_uq   = testForecast_uq   + add_back
+        testForecast_lq   = testForecast_lq   + add_back
 
-    testOriginal = RawDataOriginal[-int(test_len / freq) :, :, :].reshape(
-        -1, RawDataOriginal.shape[2]
-    )
-    # print(testForecast_mean.shape, testOriginal.shape)
-
-    # Evaluation results
+    # Evaluate (transpose to match your evaluation() expectations)
     res = evaluation(testForecast_mean.T, testOriginal.T)
+
+    size = testOriginal.shape[0]  # = test_len
 
     return (
         res,
-        testForecast_mean,
-        testOriginal,
+        testForecast_mean,     # (test_len, y_dim)
+        testOriginal,          # (test_len, y_dim)
         size,
-        forecast_d_MC_argmax,
-        testForecast_uq,
-        testForecast_lq,
+        forecast_d_MC_argmax,  # (B=1,)
+        testForecast_uq,       # (test_len, y_dim)
+        testForecast_lq,       # (test_len, y_dim)
     )
+
+# def forecast(
+#     model,
+#     X_all_s,
+#     y_all_s,
+#     train_end,
+#     testX,
+#     testY,
+#     moments,
+#     d_dim,
+#     means,
+#     trend,
+#     test_len,
+#     freq,
+#     RawDataOriginal,
+#     remove_mean=False,
+#     remove_residual=False,
+#     forecaststep=1,
+#     MC_S=200,
+# ):
+    
+#     x_hist = X_all_s[:train_end]
+
+#     y_hist = y_all_s[:train_end]
+
+#     x_fut = X_all_s[train_end: train_end + test_len]
+
+#     # forecast_MC, forecast_d_MC, forecast_z_MC = model._forecastingMultiStep(
+#     #     testX, testY, forecaststep, MC_S
+#     # )
+#     forecast_MC, forecast_d_MC, forecast_z_MC = model._forecastingMultiStep(
+#         x_hist, y_hist, step=test_len, S=200, x_fut=x_fut, use_lag=False, use_exog=True
+#     )
+
+
+#     if forecaststep == 1:
+#         all_testForecast = normalize_invert(
+#             forecast_MC.squeeze(1).transpose(1, 0, 2), moments
+#         )
+#     else:
+#         all_testForecast = normalize_invert(
+#             forecast_MC.squeeze(2).transpose(1, 0, 2), moments
+#         )
+
+#     testY_inversed = normalize_invert(testY.cpu().numpy().transpose(1, 0, 2), moments)
+#     size = testY_inversed.shape[0]
+
+#     forecast_d_MC_argmax = []
+#     for i in range(d_dim):
+#         forecast_d_MC_argmax.append(np.sum(forecast_d_MC[:, -1, :, :] == i, axis=0))
+#     forecast_d_MC_argmax = np.argmax(np.array(forecast_d_MC_argmax), axis=0).reshape(-1)
+
+#     if remove_mean:
+#         testForecast_mean = np.mean(all_testForecast, axis=1) + np.tile(
+#             means[0, :, :], (int(test_len / freq), 1)
+#         )
+#         testForecast_uq = np.quantile(all_testForecast, 0.95, axis=1) + np.tile(
+#             means[0, :, :], (int(test_len / freq), 1)
+#         )
+#         testForecast_lq = np.quantile(all_testForecast, 0.05, axis=1) + np.tile(
+#             means[0, :, :], (int(test_len / freq), 1)
+#         )
+#     elif remove_residual:
+#         testForecast_mean = np.mean(all_testForecast, axis=1) + trend[-test_len:, :]
+#         testForecast_uq = (
+#             np.quantile(all_testForecast, 0.95, axis=1) + trend[-test_len:, :]
+#         )
+#         testForecast_lq = (
+#             np.quantile(all_testForecast, 0.05, axis=1) + trend[-test_len:, :]
+#         )
+#     else:
+#         testForecast_mean = np.mean(all_testForecast, axis=1)
+#         testForecast_uq = np.quantile(all_testForecast, 0.95, axis=1)
+#         testForecast_lq = np.quantile(all_testForecast, 0.05, axis=1)
+
+#     testOriginal = RawDataOriginal[-int(test_len / freq) :, :, :].reshape(
+#         -1, RawDataOriginal.shape[2]
+#     )
+#     # print(testForecast_mean.shape, testOriginal.shape)
+
+#     # Evaluation results
+#     res = evaluation(testForecast_mean.T, testOriginal.T)
+
+#     return (
+#         res,
+#         testForecast_mean,
+#         testOriginal,
+#         size,
+#         forecast_d_MC_argmax,
+#         testForecast_uq,
+#         testForecast_lq,
+#     )
 
 
 # %%
@@ -659,6 +935,11 @@ def load_ds3m_model(
     bidirection=False,
 ):
     PATH = os.path.join(directoryBest, "checkpoint.tar")
+
+    # arch = checkpoint.get("arch", {})
+    # if arch and arch.get("x_dim") != x_dim:
+    #     raise ValueError(f"Checkpoint x_dim={arch.get('x_dim')} != current x_dim={x_dim}")
+
 
     model = DSSSM(x_dim, y_dim, h_dim, z_dim, d_dim, n_layers, device, bidirection).to(
         device
