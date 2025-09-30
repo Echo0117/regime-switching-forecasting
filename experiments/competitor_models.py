@@ -591,7 +591,7 @@ class DS3MWrapper:
     def __init__(self, lags,
                  problem="Sleep",
                  target_dim=0,
-                 train_size=20,
+                 train_size=200,
                  device="cpu",
                  use_cache=True,
                  force_new=False):

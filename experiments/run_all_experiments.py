@@ -122,7 +122,7 @@ def build_model(name, lags, params):
             lags=lags,
             problem=params.get("problem", args.problem if "args" in params else "Sleep"),
             target_dim=params.get("target_dim", 0),
-            train_size=params.get("train_size", 20),
+            train_size=params.get("train_size", 300),
             device=params.get("device", "cpu"),
             use_cache=not params.get("force_new", False),
             force_new=params.get("force_new", False),
@@ -177,7 +177,7 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args, para
     X_tr, y_tr = X_all[:train_end], y_all[:train_end]
 
     print(f"Dataset {problem}: N={N}, lags={args.lags}, train_end={train_end}, test_len={test_len}, T0={T0}")
-    print(f"y_tr mean/std: {np.mean(y_tr):.4f} / {np.std(y_tr):.4f}, len={len(y_tr)}")
+    # print(f"y_tr mean/std: {np.mean(y_tr):.4f} / {np.std(y_tr):.4f}, len={len(y_tr)}")
     print(f"X_tr: {X_tr}, y_tr: {y_tr}")
 
     from sklearn.preprocessing import StandardScaler
@@ -285,16 +285,239 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args, para
     return row, y_true_test, y_pred_test, lo_r, up_r, T0, covered_test, widths, interval_method
 
 
+def evaluate_one2(problem: str, model_name: str, interval_method: str, args, params):
+    """
+    Returns dict with metrics for CSV + artifacts:
+    (row, y_true_test, y_pred_test, lo_r, up_r, T0, covered_test, widths, interval_method)
+
+    - Robust to torch.Tensors and 3D inputs (e.g., Toy: (N, D, 1))
+    - Keeps your existing model training/pred flow
+    - Builds ACI/AgACI via adapters (RF/OLS through models.py OR your four custom models)
+    """
+    import math
+    import numpy as np
+    from sklearn.preprocessing import StandardScaler
+
+    # --- local imports (match your project layout) ---
+    from utils.ds3m_utils import load_ds3m_data
+    from competitor_models import DS3MWrapper, S4Regressor
+    from experiments.utils.acp_utils import (
+        set_backend_data, set_backend_series, set_backend_model,
+        aci_intervals, agaci_ewa
+    )
+
+    # # ----------------- helpers -----------------
+    # def _np(a):
+    #     """Return a as plain NumPy (handles torch.Tensor / lists / np)."""
+    #     try:
+    #         import torch
+    #         if isinstance(a, torch.Tensor):
+    #             return a.detach().cpu().numpy()
+    #     except Exception:
+    #         pass
+    #     return np.asarray(a)
+
+    # # ------------- 1) Load dataset -------------
+    ds = load_ds3m_data(args)
+
+    # univariate series
+    if "RawDataOriginal" in ds:
+        y_full = np.asarray(ds["RawDataOriginal"]).reshape(-1)
+    elif "data" in ds and isinstance(ds["data"], np.ndarray):
+        y_full = ds["data"][:, 0].reshape(-1)
+    else:
+        raise RuntimeError("Could not locate univariate series in dataset.")
+
+    # test length (fallback)
+    test_len = int(ds.get("test_len", max(300, len(y_full)//5)))
+
+    # Lag features
+    # X_all, y_all = make_lag_matrix(y_full, args.lags)
+    X_all = ds.get("trainX", None)
+    y_all = ds.get("trainY", None)
+    N = len(y_all)
+    T0 = int(args.train_size)
+    print("N, T0:", N, T0)
+    if T0 <= 1 or T0 >= N:
+        raise ValueError(f"Bad train_size={T0}; must be in (1, N={N})")
+    # Train split before test tail
+    # train_end = max(1, N - test_len)
+    train_end = max(T0, N - test_len)
+    X_tr, y_tr = X_all[:train_end], y_all[:train_end]
+
+    print(f"Dataset {problem}: N={N}, lags={args.lags}, train_end={train_end}, test_len={test_len}, T0={T0}")
+    # print(f"y_tr mean/std: {np.mean(y_tr):.4f} / {np.std(y_tr):.4f}, len={len(y_tr)}")
+    print(f"X_tr: {X_tr}, y_tr: {y_tr}")
+
+    from sklearn.preprocessing import StandardScaler
+    x_scaler = StandardScaler().fit(X_tr)
+    y_scaler = StandardScaler().fit(_to_col(y_tr))
+
+    X_tr_s  = x_scaler.transform(X_tr)
+    X_all_s = x_scaler.transform(X_all)
+    y_tr_s  = y_scaler.transform(_to_col(y_tr)).ravel()
+
+    print("N:", N, "test_len:", test_len, "train_end:", train_end)
+    print("y_tr mean/std:", np.mean(y_tr), np.std(y_tr), "len:", len(y_tr))
+    print("y_all head:", y_all[:5])
+
+    # Build model
+    row = {
+        "Problem": problem,
+        "Model": model_name,
+        "IntervalMethod": interval_method,
+        "RMSE": math.nan,
+        "Coverage@90": math.nan,
+        "MedianLen": math.nan,
+        "PctInfinite": math.nan,
+        "Notes": "",
+    }
+
+    # Build & run forecaster (kept as before)
+    reg = build_model(model_name, args.lags, params)
+    if isinstance(reg, DS3MWrapper):
+        yhat_all_s = reg.predict(X_all_s)
+    else:
+        reg.fit(X_tr_s, y_tr_s)
+        yhat_all_s = reg.predict(X_all_s)
+
+    # Back to original scale
+    yhat_all_s = _to_col(_np(yhat_all_s))
+    yhat_all = y_scaler.inverse_transform(yhat_all_s).ravel()
+    print("yhat_all shape:", yhat_all.shape, "y_all shape:", y_all.shape)
+    residuals = np.abs(y_all - yhat_all)
+
+    # -- 3) Register backend for ACI/AgACI (RF/OLS via models.py OR your 4 models) --
+    print(f"Registering backend for model '{model_name}'...")
+    model_key = (model_name or "").lower().strip()
+    if model_key in {"rf", "ols"}:
+        # Original models.py path
+        X_backend = X_all.T  # (d, n)
+        Y_backend = y_all    # (n,)
+        if model_key == "rf":
+            basemodel = "RF"
+            params_basemodel = {
+                "cores": -1,
+                "n_estimators": 1000,
+                "min_samples_leaf": 1,
+                "max_features": 6,
+            }
+        else:
+            basemodel = "OLS"
+            params_basemodel = {}
+        set_backend_data(
+            X_backend, Y_backend,
+            basemodel=basemodel,
+            params_basemodel=params_basemodel,
+            online=True
+        )
+    else:
+        # Custom competitor models path
+        set_backend_series(X_all, y_all)
+        if model_key == "s4":
+            set_backend_model(
+                "S4Regressor",
+                lags=args.lags,
+                device=("cuda" if getattr(args, "device", "cpu") == "cuda" else "cpu"),
+                epochs=getattr(args, "s4_epochs", 50),
+                batch=getattr(args, "s4_batch", 64),
+                lr=getattr(args, "s4_lr", 1e-3),
+                weight_decay=getattr(args, "s4_wd", 1e-2),
+                n_layers=getattr(args, "s4_layers", 4),
+                d_model=getattr(args, "s4_dmodel", 128),
+                dropout=getattr(args, "s4_dropout", 0.1),
+                amp=(getattr(args, "device", "cpu") == "cuda"),
+            )
+        elif model_key == "gru":
+            set_backend_model(
+                "MCDropoutGRU",
+                lags=args.lags,
+                device=("cuda" if getattr(args, "device", "cpu") == "cuda" else "cpu"),
+                epochs=getattr(args, "gru_epochs", 50),
+                batch=getattr(args, "gru_batch", 128),
+                lr=getattr(args, "gru_lr", 1e-3),
+                weight_decay=getattr(args, "gru_wd", 1e-4),
+                mc_samples=getattr(args, "gru_mc", 30),
+                dropout=getattr(args, "gru_dropout", 0.2),
+            )
+        elif model_key == "ruptures":
+            set_backend_model(
+                "RupturesSegmentedLinear",
+                penalty=getattr(args, "rupt_penalty", 10.0),
+                min_size=getattr(args, "rupt_min_size", 20),
+                model=getattr(args, "rupt_model", "l2"),
+            )
+        elif model_key == "gp":
+            set_backend_model(
+                "GPTorchSparse",
+                lags=args.lags,
+                num_inducing=getattr(args, "gp_m", 128),
+                iters=getattr(args, "gp_iters", 300),
+                lr=getattr(args, "gp_lr", 1e-2),
+                device=("cuda" if getattr(args, "device", "cpu") == "cuda" else "cpu"),
+            )
+        elif model_key == "ds3m":
+            set_backend_model(
+                "DS3MWrapper",
+                lags=args.lags,
+                problem=problem,
+                train_size=T0,
+                device=("cuda" if getattr(args, "device", "cpu") == "cuda" else "cpu"),
+                use_cache=True,
+                force_new=False,
+            )
+
+
+    # ------------- 4) Build intervals -------------
+    print(f"Building {interval_method} intervals (T0={T0})...")
+    if interval_method.lower() == "aci":
+        lo_r, up_r = aci_intervals(residuals, alpha=args.alpha, gamma=args.gamma, train_size=T0)
+    elif interval_method.lower() == "agaci":
+        lo_r, up_r = agaci_ewa(
+            residuals, alpha=args.alpha, train_size=T0,
+            gammas=getattr(args, "agaci_gammas", [0.005, 0.01, 0.02, 0.05]),
+            eta=getattr(args, "agaci_eta", 0.1),
+        )
+    elif interval_method.lower() == "naive":
+        lo_r, up_r = naive_fixed_intervals(residuals, alpha=args.alpha, train_size=T0)
+    else:
+        row["Notes"] = f"Unknown interval method {interval_method}"
+        return row
+
+    # -------- 5) Slice test tail; metrics --------
+    print("yhat_all mean/std:", np.mean(yhat_all), np.std(yhat_all))
+    y_pred_seg = yhat_all[T0:]
+    y_true_seg = y_all[T0:]
+    covered = (y_true_seg >= (y_pred_seg - up_r)) & (y_true_seg <= (y_pred_seg + up_r))
+
+    start_test_in_seg = max(0, (N - test_len) - T0)
+    covered_test = covered[start_test_in_seg:]
+    up_r_test = up_r[start_test_in_seg:]
+    y_pred_test = y_pred_seg[start_test_in_seg:]
+    y_true_test = y_true_seg[start_test_in_seg:]
+
+    row["RMSE"] = rmse(y_true_test, y_pred_test)
+    row["Coverage@90"] = float(np.mean(covered_test)) if covered_test.size else float("nan")
+    widths = 2.0 * up_r_test
+    row["MedianLen"] = median_len(widths)
+    row["PctInfinite"] = float(np.mean(np.isinf(up_r_test))) if up_r_test.size else float("nan")
+
+    if (model_key == "s4") and isinstance(reg, S4Regressor) and getattr(reg, "using_fallback", False):
+        row["Notes"] = "S4 fallback (Conv1d) used; pass --s4-path to enable real S4D."
+
+    return row, y_true_test, y_pred_test, lo_r, up_r, T0, covered_test, widths, interval_method
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--problem", default="Unemployment",
-                    choices=["Pernod","Toy","Lorenz","Sleep","Unemployment","Hangzhou","Seattle","Pacific","Electricity"])
+                    choices=["Toy","Lorenz","Sleep","Unemployment","Hangzhou","Seattle","Pacific","Electricity","Pernod"])
     ap.add_argument("--lags", type=int, default=48)
 
     # Interval settings
     ap.add_argument("--alpha", type=float, default=0.1)
     ap.add_argument("--gamma", type=float, default=0.01)
-    ap.add_argument("--train_size", type=int, default=20)
+    ap.add_argument("--train_size", type=int, default=100)
 
     ap.add_argument("--agaci", action="store_true")  # (unused here; we sweep methods)
     ap.add_argument("--agaci_gammas", type=float, nargs="*", default=[0.005, 0.01, 0.02, 0.05])

@@ -367,6 +367,8 @@ def load_ds3m_data(args):
 
 
     # %%
+    print("dataname:", dataname)
+    print("train_data size:", train_data.shape)
     if dataname != "Pernod":
         # Normalize the dataset
         moments = normalize_moments(train_data)
@@ -375,9 +377,14 @@ def load_ds3m_data(args):
         test_data = normalize_fit(test_data, moments)
 
         # Create training and test dataset
+        print("train_data size:", train_data.shape)
+        print("valid_data size:", valid_data.shape)
+        print("test_data size:", test_data.shape)
         trainX, trainY = create_dataset2(train_data, timestep)
         validX, validY = create_dataset2(valid_data, timestep)
         testX, testY = create_dataset2(test_data, timestep)
+        print("2D size(X):", trainX.shape, validX.shape, testX.shape)
+        print("2D size(Y):", trainY.shape, validY.shape, testY.shape)
 
         trainX = np.transpose(trainX, (1, 0, 2))
         validX = np.transpose(validX, (1, 0, 2))

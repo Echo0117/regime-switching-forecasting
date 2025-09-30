@@ -20,10 +20,10 @@ S4_PATH="./s4"
 OUTCSV="experiments/results_all_${DEVICE}.csv"
 
 # Common sweep settings
-LAGS="${LAGS:-48}"
+LAGS="${LAGS:-0}"
 ALPHA="${ALPHA:-0.1}"
 GAMMA="${GAMMA:-0.01}"
-TRAIN_SIZE="${TRAIN_SIZE:-200}"
+TRAIN_SIZE="${TRAIN_SIZE:-100}"
 
 # Models to run (edit to add/remove)
 MODELS=("ds3m")
@@ -31,13 +31,14 @@ MODELS=("ds3m")
 
 # Interval methods to run
 # METHODS=("ACI")
-METHODS=("ACI" "AgACI" "Naive")
+METHODS=("ACI")
 # Datasets to loop
 PROBLEMS=(
-  "Toy"
+  # "Pernod"
+  # "Toy"
   "Sleep"
-  "Unemployment"
-  "Lorenz"
+  # "Unemployment"
+  # "Lorenz"
   # "Hangzhou"
   # "Seattle"
   # "Pacific"
