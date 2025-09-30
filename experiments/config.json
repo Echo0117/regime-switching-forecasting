@@ -1,56 +1,65 @@
 {
   "dataset": {
-    "path": "dataset/input_data/5c_dlm_training_data_aggregated.csv",
-    "brand": "absolut",
-    // "brand_list": ["absolut", "chivas_regal", "havana_club", "jameson", "lillet", "malfy", "malibu", "ramazzotti"],
-    "brand_list": ["havana_club", "jameson", "lillet", "malfy", "malibu", "ramazzotti"],
+    "path": "/Users/pr059704/Library/CloudStorage/OneDrive-PERNODRICARD/Documents/phd/code/reference_projects/Deep-Switching-State-Space-Model/data/Electricity/French_all.csv",
+   // "brand": "absolut",
+    "brand_list": [
+      "absolut"
+      // "jameson",
+      // "lillet",
+      // "malfy",
+      // "malibu",
+      // "ramazzotti"
+    ],
     "dependent_variable": "volume_so",
-    "independent_variables_X": ["january", "february", "march", "april", "may", "june", "july", "august", "september", 
-    "october", "november", "december", "is_one_week_before_last", "is_last_week_of_the_year", "is_christmas","is_easter"],
-    "independent_variables_Z": ["television","out_of_home", "digital", "digital_social_media", "brand_experience",
-    "off_trade_visibility", "distribution_off","relative_gap_to_90th_price", "pct_price_diff_with_competitors"],
-    "isNormalizeX": false
+    "independent_variables": [
+      "january",
+      "february",
+      "march",
+      "april",
+      "may",
+      "june",
+      "july",
+      "august",
+      "september",
+      "october",
+      "november",
+      "december",
+      "is_one_week_before_last",
+      "is_last_week_of_the_year",
+      "is_christmas",
+      "is_easter",
+      "television",
+      "out_of_home",
+      "digital",
+      "digital_social_media",
+      "brand_experience",
+      "off_trade_visibility",
+      "distribution_off",
+      "relative_gap_to_90th_price",
+      "pct_price_diff_with_competitors"
+    ]
   },
-  "inferenceMethod": "torch_autograd", 
+  "event_cols": [
+    "is_one_week_before_last",
+    "is_last_week_of_the_year",
+    "is_christmas",
+    "is_easter"
+  ],
   "modelTraining": {
-    "epoch": 15000,
-    "learningRate": 0.0005,
-    "momentum": 0.635068,
-    "weightDecay": 1e-4,
-    "maxGradNorm": 0.5,
-    "maxGradValue": 0.1,
-    "gammal2Lambda": 1e-2,
-    "zetal2Lambda": 1e-2,
-    "l2Lambda": 1e-2,
-    "originalG": 0.0, 
-    "addSigmoid": true,
-    "minDelta": 1e-4,
-    "factor": 0.4102291217861174,
-    "patience": 10,
-    "ifCrossValidation": true,
-    "ifSimulation": false,
-    "numTrainingData": 240,
-    "numKFolder":5,
-    "modelPath": "saved_models/model.pkl",
-    "lossPath": "dataset/generated_results/loss_results.csv",
-    "parametersPath": "dataset/generated_results/parameters_results.csv"
-  },
-  "simulationRecovery":{
-    "independentRun": 3,
-    "independentRunList": [2, 5, 10, 50],
-    "ListG":  [4.5951, 5.29, 6.91],
-    "paramsSavedPath": "dataset/generated_results/simulated_parameters.csv",
-    "simulatedParamSavedPath": "dataset/generated_results/temp_simulated.csv",
-    "isGammaEqualZeta": false
-  },
-  "inferenceParams":{
-    "mcmc":{
-      "nWalkers": 32,
-      "numSamples": 1000,
-      "burnInSteps": 100,
-      "numStepsBetweenSamples": 50,
-      "perturbationNoise": 0.0001
-    }
-  },
-  "device": "cpu"
+    "brand": "absolut",
+    "test_len": 52,
+    "freq": 1,
+    "timestep": 231,
+    "predict_dim": 1,
+    "z_dim": 10,
+    "d_dim": 2,
+    "h_dim": 64,
+    "n_layers": 1,
+    "clip": 10,
+    "learning_rate": 1e-3,
+    "batch_size": 64,
+    "n_epochs": 200,
+    "valid_ratio": 0.2,
+    "bidirection": false
+  }
 }

@@ -641,16 +641,36 @@ class DS3MWrapper:
             )
             # 2) one-step prediction on the test block
             res, testForecast_mean, testOriginal, size, d_argmax, uq, lq = forecast(
-                model,
-                ds["X_all_s"], ds["y_all_s"], ds["train_end"],
+                model,   
                 ds["testX"], ds["testY"],
-                ds["moments"], ds["d_dim"],
+                ds["train_end"],ds["test_len"],
+                ds["d_dim"],
                 ds["means"], ds["trend"],
-                ds["test_len"], ds["freq"],
+                ds["freq"],
                 ds["RawDataOriginal"],
                 remove_mean=ds["remove_mean"],
                 remove_residual=ds["remove_residual"],
             )
+            # model.eval()  # <- important: disable dropout etc.
+            # res, testForecast_mean, testOriginal, size, d_argmax, uq, lq = forecast(
+            #     model,
+            #     ds["X_all_s"],          # standardized full exogenous matrix (N, x_dim)
+            #     ds["y_all_s"],          # standardized full target (N,)
+            #     ds["train_end"],        # integer split point
+            #     ds["testX"],            # keep passing if your plotting needs it; not used by forecast now
+            #     ds["testY"],            # idem
+            #     ds["moments"],
+            #     ds["d_dim"],
+            #     ds["means"],
+            #     ds["trend"],
+            #     ds["test_len"],
+            #     ds["freq"],
+            #     ds["RawDataOriginal"],
+            #     remove_mean=ds["remove_mean"],
+            #     remove_residual=ds["remove_residual"],
+            #     forecaststep=1,
+            #     MC_S=200,
+            # )
 
             res_dict = dict(
                 y_pred_mean=testForecast_mean,

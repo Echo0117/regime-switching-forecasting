@@ -7,20 +7,17 @@ Model, IntervalMethod, RMSE, Coverage@90, MedianLen, PctInfinite, Notes
 import argparse, os, sys, csv, math, numpy as np
 from typing import Dict, Tuple
 
-
-# from s4.src.callbacks import params
-
 HERE = os.path.dirname(__file__)
 PROJ = os.path.abspath(os.path.join(HERE, ".."))
 for p in [HERE, PROJ]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from experiments.config import config
+# ---- Conformal utils (yours) ----
 from experiments.competitor_models import DS3MWrapper, GPTorchSparse, MCDropoutGRU, RupturesSegmentedLinear, S4Regressor
 from experiments.utils.acp_utils import aci_intervals, agaci_ewa
-from experiments.utils.pernod_loader import DataPreprocessing
 
+# ---- DS3M data loader (yours) ----
 from experiments.utils.ds3m_utils import load_ds3m_data
 from experiments.utils.plot_utils import plot_results_with_aci
 
@@ -123,14 +120,13 @@ def build_model(name, lags, params):
     if name == "ds3m":
         return DS3MWrapper(
             lags=lags,
-            problem=params.get("problem", "Pernod"),
+            problem=params.get("problem", args.problem if "args" in params else "Sleep"),
             target_dim=params.get("target_dim", 0),
             train_size=params.get("train_size", 20),
             device=params.get("device", "cpu"),
             use_cache=not params.get("force_new", False),
-            force_new=params.get("force_new", True),
+            force_new=params.get("force_new", False),
         )
-
 
 def naive_fixed_intervals(residuals, alpha, train_size):
     """
@@ -164,65 +160,25 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args, para
         raise RuntimeError("Could not locate univariate series in dataset.")
 
     # test length (fallback)
-    test_len = int(ds.get("test_len", max(200, len(y_full)//5)))
+    test_len = int(ds.get("test_len", max(30, len(y_full)//5)))
 
     # Lag features
-    # ---- Build feature matrix possibly with exogenous ----
-    # Target is always y_all (Y shifted by lags)
-    if args.use_exog and (problem.lower() == "pernod"):
-        # 1) Get exogenous, normalized same way your preprocessor does
-
-        data_preprocessing = DataPreprocessing(
-            "Deep_Switching_State_Space_Model/data/Pernod/pernod.csv",
-            config["dataset"]["brand"],
-            config["dataset"]["dependent_variable"],
-            config["dataset"]["independent_variables_X"],  
-            config["dataset"]["independent_variables_Z"], 
-        )
-        X_t, Z_t, Y_t = data_preprocessing.preprocess(normalization=True)  # -> numpy
-
-        # Sanity: align to y_full length (both come from the same Pernod pipeline ideally)
-        INP = np.concatenate(
-            [X_t if X_t is not None else np.zeros((len(Y_t), 0), np.float32),
-            Z_t if Z_t is not None else np.zeros((len(Y_t), 0), np.float32)],
-            axis=1
-        ).astype(np.float32)
-        y_vec = np.asarray(Y_t, dtype=np.float32).reshape(-1)
-
-        if len(y_vec) != len(y_full):
-            # Fallback: trust Y_t as the canonical series when using exog
-            y_full = y_vec
-
-        # 2) Lag Y if requested, then align rows
-        if args.include_y_lags and args.lags > 0:
-            X_lag, y_all = make_lag_matrix(y_full, args.lags)      # (T-l, l), (T-l,)
-            INP_lagged = INP[args.lags:]                           # drop first l rows to align
-            X_all = np.concatenate([X_lag, INP_lagged], axis=1)    # [Y-lags | exog]
-        else:
-            # No Y lags → features are just exogenous; still need y_all aligned
-            if args.lags > 0:
-                # keep API stable: y_all is Y shifted by lags; drop same rows from exog
-                _, y_all = make_lag_matrix(y_full, args.lags)      # (T-l,)
-                X_all = INP[args.lags:]                             # (T-l, d_exog)
-            else:
-                y_all = y_full
-                X_all = INP
-        print("X_all shape:", X_all.shape)
-        print("y_all shape:", y_all.shape)
-
-    else:
-        # Original behavior: Y-lags only
-        X_all, y_all = make_lag_matrix(y_full, args.lags)
-
+    # X_all, y_all = make_lag_matrix(y_full, args.lags)
+    X_all = ds.get("trainX", None)
+    y_all = ds.get("trainY", None)
     N = len(y_all)
     T0 = int(args.train_size)
+    print("N, T0:", N, T0)
     if T0 <= 1 or T0 >= N:
         raise ValueError(f"Bad train_size={T0}; must be in (1, N={N})")
-
     # Train split before test tail
     # train_end = max(1, N - test_len)
     train_end = max(T0, N - test_len)
     X_tr, y_tr = X_all[:train_end], y_all[:train_end]
+
+    print(f"Dataset {problem}: N={N}, lags={args.lags}, train_end={train_end}, test_len={test_len}, T0={T0}")
+    print(f"y_tr mean/std: {np.mean(y_tr):.4f} / {np.std(y_tr):.4f}, len={len(y_tr)}")
+    print(f"X_tr: {X_tr}, y_tr: {y_tr}")
 
     from sklearn.preprocessing import StandardScaler
     x_scaler = StandardScaler().fit(X_tr)
@@ -231,12 +187,7 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args, para
     X_tr_s  = x_scaler.transform(X_tr)
     X_all_s = x_scaler.transform(X_all)
     y_tr_s  = y_scaler.transform(_to_col(y_tr)).ravel()
-    # reg = build_model(model_name, args.lags, params)
-    # reg.fit(X_tr_s, y_tr_s)
-    # yhat_all_s = reg.predict(X_all_s).reshape(-1, 1)
-    # print("X_tr_s shape:", X_tr_s)
-    print("y_tr_s shape:", y_tr_s.shape)
-    print("X_all_s shape:", X_all_s.shape)
+
     print("N:", N, "test_len:", test_len, "train_end:", train_end)
     print("y_tr mean/std:", np.mean(y_tr), np.std(y_tr), "len:", len(y_tr))
     print("y_all head:", y_all[:5])
@@ -255,8 +206,7 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args, para
 
     # Fit / Predict
     # try:
-    d_in = X_tr_s.shape[1] 
-    reg = build_model(model_name, d_in, params)
+    reg = build_model(model_name, args.lags, params)
     if isinstance(reg, DS3MWrapper):
         # DS3M expects full prediction; user-provided function should handle everything
         yhat_all_s = reg.predict(X_all_s)
@@ -359,61 +309,9 @@ def main():
     ap.add_argument("--models", nargs="*", default=["S4","CPD","MCDropoutGRU","GPTorchSparse","DS3M"])
     ap.add_argument("--methods", nargs="*", default=["ACI","AgACI","Naive"])
 
-    # ap.add_argument("--models", nargs="*", default=["S4","CPD","MCDropoutGRU","GPTorchSparse","DS3M"])
-    # ap.add_argument("--methods", nargs="*", default=["ACI","AgACI","Naive"])
-
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--csv", default="paper_results.csv")
-
-
-    ap.add_argument("--pernod-resample", type=str, default=None,
-        choices=[None, "raw", "D", "W", "MS"],
-    help="Resample rule: None(infer), raw(no resample), D, W, MS")
-    ap.add_argument("--pernod-agg", type=str, default="mean",
-        choices=["mean", "sum"], help="Aggregation used when resampling")
-    ap.add_argument("--pernod-fillna", type=str, default="ffill",
-        help="Missing handling: ffill/bfill/none or numeric literal (e.g., 0)")
-    ap.add_argument("--pernod-normalize", default=True,
-        help="Apply AbsoluteMedianScaler to Y (and X/Z if provided)")
-    ap.add_argument("--pernod-drop-zero-y", default=False,
-        help="Drop rows where Y==0 before normalization")
-
-    # optional feature blocks (comma-separated lists)
-    ap.add_argument("--pernod-brand", type=str, default="absolut",
-        help="Brand name to filter in Pernod dataset")
-    ap.add_argument("--pernod-x-cols", type=str, default="",
-        help="Comma-separated control columns X")
-    ap.add_argument("--pernod-z-cols", type=str, default="",
-        help="Comma-separated marketing columns Z")
-    ap.add_argument("--use-exog", default=True,
-                    help="Use exogenous features (X/Z) in addition to or instead of Y lags")
-    ap.add_argument("--include-y-lags", default=True,
-                    help="If set with --use-exog, stack Y lag features with exogenous.")
-
     args = ap.parse_args()
-
-    def _parse_cols(s: str):
-        return [c.strip() for c in s.split(",") if c.strip()] if s else []
-
-    _fill = args.pernod_fillna
-    if isinstance(_fill, str):
-        low = _fill.strip().lower()
-        if low in ("none", "null", "nan"):
-            fillna_val = None
-        elif low in ("ffill", "bfill"):
-            fillna_val = low
-        else:
-            try:
-                fillna_val = float(_fill)  # numeric literal as constant fill
-            except Exception:
-                raise ValueError(f"--pernod-fillna must be ffill/bfill/none or a number; got {_fill}")
-    else:
-        fillna_val = _fill
-
-    args._pernod_fillna_parsed = fillna_val
-    args._pernod_x_cols_parsed = _parse_cols(args.pernod_x_cols)
-    args._pernod_z_cols_parsed = _parse_cols(args.pernod_z_cols)
-
 
     # device
     device = pick_device(args.device)
@@ -440,17 +338,8 @@ def main():
     rows = []
     for model_name in args.models:
         for method in args.methods:
-            # try:
-            
             row, y_true, y_pred_mean, lower_r, upper_r, T0, coverage, width, method_name = \
             evaluate_one(args.problem, model_name, method, args, params)
-            # except Exception as e:
-            #     row = {
-            #         "Problem": args.problem, "Model": model_name, "IntervalMethod": method,
-            #         "RMSE": float("nan"), "Coverage@90": float("nan"),
-            #         "MedianLen": float("nan"), "PctInfinite": float("nan"),
-            #         "Notes": f"FATAL: {e}",
-            #     }
             print(f"[{args.problem}] {model_name} + {method} -> "
                   f"RMSE={row['RMSE']:.4f} | Cov={row['Coverage@90']:.3f} | "
                   f"MedLen={row['MedianLen']:.3f} | %Inf={row['PctInfinite']:.3f} | {row['Notes']}")

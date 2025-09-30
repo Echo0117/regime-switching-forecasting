@@ -248,60 +248,60 @@ def plot_results_with_ds3m_aci(
             print(f"[WARN] Plot regime heatmap failed: {e}")
 
 
-def evaluate_intervals(y_true, y_pred, lower, upper, alpha=0.1, window=50):
-    """
-    y_true, y_pred, lower, upper: shape (T,)
-    alpha: target mis-coverage
-    window: rolling coverage window size
+# def evaluate_intervals(y_true, y_pred, lower, upper, alpha=0.1, window=50):
+#     """
+#     y_true, y_pred, lower, upper: shape (T,)
+#     alpha: target mis-coverage
+#     window: rolling coverage window size
 
-    """
-    y_true = np.asarray(y_true).ravel()
-    y_pred = np.asarray(y_pred).ravel()
-    lower = np.asarray(lower).ravel()
-    upper = np.asarray(upper).ravel()
-    T = len(y_true)
+#     """
+#     y_true = np.asarray(y_true).ravel()
+#     y_pred = np.asarray(y_pred).ravel()
+#     lower = np.asarray(lower).ravel()
+#     upper = np.asarray(upper).ravel()
+#     T = len(y_true)
 
-    covered = (y_true >= lower) & (y_true <= upper)
-    picp = covered.mean()  # Prediction Interval Coverage Probability
-    ace = abs(picp - (1 - alpha))  # Absolute Coverage Error
-    width = np.mean(upper - lower)
-    width_med = np.median(upper - lower)
+#     covered = (y_true >= lower) & (y_true <= upper)
+#     picp = covered.mean()  # Prediction Interval Coverage Probability
+#     ace = abs(picp - (1 - alpha))  # Absolute Coverage Error
+#     width = np.mean(upper - lower)
+#     width_med = np.median(upper - lower)
 
-    # Interval Score（Gneiting & Raftery, 2007）
-    # ISα = (U-L) + (2/α)*(L - y)+ + (2/α)*(y - U)+
-    over_lower = np.maximum(0.0, lower - y_true)  # (L - y)+
-    over_upper = np.maximum(0.0, y_true - upper)  # (y - U)+
-    interval_score = np.mean(
-        (upper - lower) + (2.0 / alpha) * over_lower + (2.0 / alpha) * over_upper
-    )
+#     # Interval Score（Gneiting & Raftery, 2007）
+#     # ISα = (U-L) + (2/α)*(L - y)+ + (2/α)*(y - U)+
+#     over_lower = np.maximum(0.0, lower - y_true)  # (L - y)+
+#     over_upper = np.maximum(0.0, y_true - upper)  # (y - U)+
+#     interval_score = np.mean(
+#         (upper - lower) + (2.0 / alpha) * over_lower + (2.0 / alpha) * over_upper
+#     )
 
-    # rolling coverage
-    if T >= window:
-        rc = (
-            np.convolve(
-                covered.astype(float), np.ones(window, dtype=float), mode="valid"
-            )
-            / window
-        )
-    else:
-        rc = np.array([])
+#     # rolling coverage
+#     if T >= window:
+#         rc = (
+#             np.convolve(
+#                 covered.astype(float), np.ones(window, dtype=float), mode="valid"
+#             )
+#             / window
+#         )
+#     else:
+#         rc = np.array([])
 
-    non_cov = (~covered).astype(int)
-    max_streak = 0
-    curr = 0
-    for v in non_cov:
-        if v == 1:
-            curr += 1
-            max_streak = max(max_streak, curr)
-        else:
-            curr = 0
+#     non_cov = (~covered).astype(int)
+#     max_streak = 0
+#     curr = 0
+#     for v in non_cov:
+#         if v == 1:
+#             curr += 1
+#             max_streak = max(max_streak, curr)
+#         else:
+#             curr = 0
 
-    return {
-        "PICP": picp,
-        "ACE": ace,
-        "Width_mean": width,
-        "Width_median": width_med,
-        "IntervalScore": interval_score,
-        "RollingCoverage": rc,  # 一段数列可选择绘出来
-        "MaxNonCoverageStreak": max_streak,
-    }
+#     return {
+#         "PICP": picp,
+#         "ACE": ace,
+#         "Width_mean": width,
+#         "Width_median": width_med,
+#         "IntervalScore": interval_score,
+#         "RollingCoverage": rc,  # 一段数列可选择绘出来
+#         "MaxNonCoverageStreak": max_streak,
+#     }

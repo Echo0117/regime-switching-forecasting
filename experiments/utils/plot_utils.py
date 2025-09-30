@@ -4,6 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from experiments.config import config
+
 def _ensure_2d(a):
     """Reshape (T, D, 1) -> (T, D). Leave (T, D) as-is."""
     if a is None:
@@ -132,11 +134,6 @@ def plot_results_with_aci(
         print(f"       y_true[{T0}:{T}]={y_true_1d[T0:T]}")
         print(f"       y_pred[{T0}:{T}]={y_pred_1d[T0:T]}")
         print(f"       aci_upper[:{N_test}]={aci_upper}")
-
-        # print(f"[PLOT] ACI on test split t={T0}..{T-1} (len={len(tt_test)}), {tt_test}")
-        # print(f"       y_true[{T0}:{T0+len(tt_test)}]  y_pred[{T0}:{T0+len(tt_test)}], {y_pred_1d[T0 : T0 + len(tt_test)]}")
-        # print(f"       y_pred[{T0}:{T0+len(tt_test)}]={y_true_1d[T0 : T0 + len(tt_test)]}")
-        # print(f"       aci_upper[:{len(tt_test)}]={aci_upper}") 
         
         # Overlay True + Pred on test window
         plt.plot(tt_test, y_true_1d[T0 : T0 + len(tt_test)], color="black", lw=1.0, label="True (test)")
@@ -215,3 +212,112 @@ def plot_results_with_aci(
             print(f"[FIG] Saved: {out_hm}")
         except Exception as e:
             print(f"[WARN] Plot regime heatmap failed: {e}")
+
+def plot_forecasts_and_regimes(
+    testOriginal,
+    testForecast_mean,
+    testForecast_uq,
+    testForecast_lq,
+    size,
+    forecast_d_MC_argmax,
+    brand_name,
+    figdirectory,
+    cmap
+):
+    """
+    Replicates your per-brand forecasting + regime heatmap plots, unchanged names.
+    Saves one PNG per brand to `figdirectory + f"{brand}.png"`.
+    """
+    os.makedirs(os.path.dirname(figdirectory), exist_ok=True)
+
+    brand_names = [brand_name]
+
+    print("Brands:", testOriginal.shape)
+    for station, brand in enumerate(brand_names):
+        print("Plotting brand:", brand)
+
+        fig, (ax1, ax2) = plt.subplots(
+            2, 1, figsize=(10, 4),
+            sharex=True, gridspec_kw={'height_ratios': [3, 0.5]}
+        )
+
+        ax1.plot(testOriginal[:, station], label='original')
+        ax1.plot(testForecast_mean[:, station], label='predict')
+        ax1.plot(testForecast_uq[:, station], color='grey', alpha=0.8)
+        ax1.plot(testForecast_lq[:, station], color='grey', alpha=0.8)
+        ax1.fill_between(
+            np.arange(size),
+            testForecast_uq[:, station],
+            testForecast_lq[:, station],
+            color='grey', alpha=0.4
+        )
+        ax1.legend()
+
+        # Regime heatmap for the forecast horizon (1 x T)
+        sns.heatmap(
+            np.asarray(forecast_d_MC_argmax).reshape(1, -1),
+            linewidth=0, cbar=False, alpha=1,
+            cmap=cmap, vmin=0, vmax=max(1, np.max(forecast_d_MC_argmax)),
+            ax=ax2
+        )
+
+        plt.suptitle(f"Pernod | Brand: {brand}")
+        plt.tight_layout()
+        out_path = f"{figdirectory}{brand}_{config['modelTraining']['d_dim']}.png"
+        plt.savefig(out_path, format="png", dpi=150)
+        plt.close(fig)
+        print(f"Saved: {out_path}")
+
+
+def plot_switches_vs_events(
+    dfb,
+    regime_ids,
+    event_cols,
+    time_col="year_week",
+    save_path=None
+):
+    """
+    Post-hoc diagnostic: show where regime switches (vertical red lines) happen,
+    and overlay event markers above the plot. Variable names unchanged.
+    """
+    import matplotlib.pyplot as plt
+
+    t = np.arange(len(dfb))
+    reg = np.asarray(regime_ids).reshape(-1)
+    switches = np.where(reg[1:] != reg[:-1])[0] + 1
+
+    fig, ax = plt.subplots(figsize=(12, 3))
+    # Optional: draw regime ids as a line (commented to match your snippet)
+    # ax.plot(t, reg, lw=1)
+    ax.vlines(
+        switches,
+        ymin=reg.min() - 0.2,
+        ymax=reg.max() + 0.2,
+        color="red", alpha=0.3, lw=1
+    )
+    ax.set_title("Regimes over time (red lines = switches)")
+
+    # overlay events
+    max_y = reg.max() if reg.size > 0 else 1
+    for j, c in enumerate(event_cols):
+        if c not in dfb.columns:
+            continue
+        mask = (dfb[c].to_numpy() > 0)
+        ax.scatter(
+            np.where(mask)[0],
+            np.full(mask.sum(), max_y + 0.3 + j * 0.15),
+            s=10, label=c
+        )
+
+    ax.legend(loc="upper left", fontsize=8, ncol=2)
+    ax.set_xlabel(time_col)
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        print(f"Saved plot to {save_path}")
+    else:
+        plt.show()
+
+    plt.close(fig)

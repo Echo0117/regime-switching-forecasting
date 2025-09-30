@@ -4,8 +4,6 @@ import argparse, os
 import numpy as np
 import os, sys
 
-# from experiments.interval_evaluate_utils import evaluate_intervals
-
 HERE = os.path.dirname(__file__)
 PROJ_ROOT = os.path.abspath(os.path.join(HERE, ".."))
 if PROJ_ROOT not in sys.path:
@@ -230,7 +228,7 @@ def main() -> None:
         width=width,
     )
 
-        # ===================== Metrics (test segment only) =====================
+    # ===================== Metrics (test segment only) =====================
     # test segment is t >= T0 by construction of ACI
     y_pred_test = y_pred_1d[T0:]
     y_true_test = y_true_1d[T0:]
