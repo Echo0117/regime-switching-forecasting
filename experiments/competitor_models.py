@@ -609,7 +609,7 @@ class DS3MWrapper:
         self._test_len = None
 
     # --- private: run / load DS³M forecast and align to harness timeline ----
-    def _get_ds3m_forecast(self):
+    def _get_ds3m_forecast(self, args):
         # Local imports to avoid hard dependency when not used
         from experiments.utils.ds3m_utils import (
             load_ds3m_data, load_ds3m_model, forecast
@@ -619,16 +619,16 @@ class DS3MWrapper:
         )
 
         # Mimic the minimal 'args' needed by load_ds3m_data()
-        class _Args:
-            def __init__(self, problem, train_size):
-                self.problem = problem
-                self.train_size = train_size
-        args = _Args(self.problem, self.train_size)
+        # class _Args:
+        #     def __init__(self, problem, train_size):
+        #         self.problem = problem
+        #         self.train_size = train_size
+        # args = _Args(self.problem, self.train_size)
 
         # 0) try cache
         cached = None
-        if self.use_cache and not self.force_new:
-            cached = load_forecast(self.problem)
+        # if self.use_cache and not self.force_new:
+        #     cached = load_forecast(self.problem)
 
         if cached is None:
             # 1) load DS³M dataset + trained checkpoint
@@ -671,7 +671,7 @@ class DS3MWrapper:
 
         return res_dict
 
-    def fit(self, X, y):
+    def fit(self, X, y, args):
         """
         Produces aligned predictions for the whole lag-matrix timeline.
         X : array of shape (N, lags)
@@ -681,7 +681,7 @@ class DS3MWrapper:
         N = X.shape[0]
         self._N = N
 
-        res = self._get_ds3m_forecast()
+        res = self._get_ds3m_forecast(args)
         test_len = int(res["test_len"])
         self._test_len = test_len
 
@@ -703,9 +703,9 @@ class DS3MWrapper:
         self._yhat_all = yhat_all
         return self
 
-    def predict(self, X):
+    def predict(self, X, args):
         if self._yhat_all is None:
             # If .fit() wasn’t explicitly called, compute on the fly
-            self.fit(X, np.zeros(len(X), dtype=np.float32))
+            self.fit(X, np.zeros(len(X), dtype=np.float32), args)
         # Return 1D vector of length N (same as y_all)
         return self._yhat_all.copy()

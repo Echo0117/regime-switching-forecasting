@@ -17,7 +17,7 @@ for p in [HERE, PROJ]:
 
 # ---- Conformal utils (yours) ----
 from experiments.competitor_models import DS3MWrapper, GPTorchSparse, MCDropoutGRU, RupturesSegmentedLinear, S4Regressor
-from experiments.utils.acp_utils import aci_intervals, agaci_ewa
+from experiments.utils.acp_utils import aci_intervals, agaci_ewa, set_backend_data, set_backend_model, set_backend_series
 
 # ---- DS3M data loader (yours) ----
 from experiments.utils.ds3m_utils import load_ds3m_data
@@ -76,12 +76,12 @@ def _to_col(a):
 # ---------------------------
 # Builders & Intervals
 # ---------------------------
-def build_model(name, lags, params):
+def build_model(name, args, params):
     name = name.lower()
     device = params.get("device", "cpu")
     if name == "s4":
         return S4Regressor(
-            lags=lags,
+            lags=args.lags,
             d_model=params.get("s4_d_model", 128),
             n_layers=params.get("s4_layers", 4),
             dropout=params.get("s4_dropout", 0.1),
@@ -100,7 +100,7 @@ def build_model(name, lags, params):
         )
     if name == "mcdropoutgru":
         return MCDropoutGRU(
-            lags=lags,
+            lags=args.lags,
             hidden=params.get("gru_hidden", 128),
             layers=params.get("gru_layers", 2),
             dropout=params.get("gru_dropout", 0.2),
@@ -113,7 +113,7 @@ def build_model(name, lags, params):
         )
     if name == "gptorchsparse":
         return GPTorchSparse(
-            lags=lags,
+            lags=args.lags,
             num_inducing=params.get("gp_inducing", 128),
             iters=params.get("gp_iters", 300),
             lr=params.get("gp_lr", 0.01),
@@ -121,10 +121,10 @@ def build_model(name, lags, params):
         )
     if name == "ds3m":
         return DS3MWrapper(
-            lags=lags,
-            problem=params.get("problem", args.problem if "args" in params else "Sleep"),
+            lags=args.lags,
+            problem=args.problem,
             target_dim=params.get("target_dim", 0),
-            train_size=params.get("train_size", 20),
+            train_size=params.get("train_size", 200),
             device=params.get("device", "cpu"),
             use_cache=not params.get("force_new", False),
             force_new=params.get("force_new", False),
@@ -179,10 +179,6 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args, para
     train_end = max(T0, N - test_len)
     X_tr, y_tr = X_all[:train_end], y_all[:train_end]
 
-    # print("X_tr:", X_tr)
-    # print("y_tr:", y_tr)
-
-
     from sklearn.preprocessing import StandardScaler
     x_scaler = StandardScaler().fit(X_tr)
     y_scaler = StandardScaler().fit(_to_col(y_tr))
@@ -196,7 +192,8 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args, para
     # print("X_tr_s shape:", X_tr_s)
     
     print("N:", N, "test_len:", test_len, "train_end:", train_end)
-    print("y_tr mean/std:", np.mean(y_tr), np.std(y_tr), "len:", len(y_tr))
+    print("0y_tr mean/std:", np.mean(y_tr), np.std(y_tr), "len:", len(y_tr))
+    print("0y_tr_s mean/std:", np.mean(y_tr_s), np.std(y_tr_s), "len:", len(y_tr_s))
     print("y_all head:", y_all[:5])
 
     # Build model
@@ -211,15 +208,15 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args, para
         "Notes": "",
     }
 
-    # Fit / Predict
-    # try:
-    reg = build_model(model_name, args.lags, params)
+    reg = build_model(model_name, args, params)
     if isinstance(reg, DS3MWrapper):
         # DS3M expects full prediction; user-provided function should handle everything
-        yhat_all_s = reg.predict(X_all_s)
+        # reg.fit(X_tr_s, y_tr_s, args)
+        yhat_all_s = reg.predict(X_all_s, args)
+        # yhat_all_s = reg.predict(X_all_s, args)
     else:
-        reg.fit(X_tr_s, y_tr_s)
-        yhat_all_s = reg.predict(X_all_s)
+        reg.fit(X_tr_s, y_tr_s, args)
+        yhat_all_s = reg.predict(X_all_s, args)
 
     # except Exception as e:
     #     row["Notes"] = f"ERROR: {e}"
@@ -232,10 +229,14 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args, para
     # Ensure 2D for inverse_transform
     yhat_all_s = _to_col(yhat_all_s)
 
+    print("before yhat_all_s mean/std:", np.mean(yhat_all_s), np.std(yhat_all_s), "len:", len(yhat_all_s))
+
     # Back to original scale -> 1D
     yhat_all = y_scaler.inverse_transform(yhat_all_s).ravel()
-
-    print("yhat_all mean/std:", np.mean(yhat_all), np.std(yhat_all))
+    # y_all = y_scaler.inverse_transform(y_all).ravel()
+  
+    print("1yhat_all mean/std:", np.mean(yhat_all), np.std(yhat_all))
+    print("1y_all mean/std:", np.mean(y_all), np.std(y_all))
     print("corr(y_all, yhat_all):", np.corrcoef(y_all, yhat_all)[0,1])
 
     # Residuals along entire sequence (align with y_all)
@@ -244,28 +245,111 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args, para
         row["Notes"] = f"len(yhat_all)={len(yhat_all)} != len(y_all)={len(y_all)}"
         return row
     
-    print("yhat_all mean/std:", np.mean(yhat_all), np.std(yhat_all))
-    print("corr(y_all, yhat_all):", np.corrcoef(y_all, yhat_all)[0,1])
+    print("2yhat_all mean/std:", np.mean(yhat_all), np.std(yhat_all))
+    print("2y_all mean/std:", np.mean(y_all), np.std(y_all))
 
     residuals = np.abs(y_all - yhat_all)
 
-    # Intervals on t>T0 (online/calibration window is first T0)
-    try:
-        if interval_method.lower() == "aci":
-            lo_r, up_r = aci_intervals(residuals, alpha=args.alpha, gamma=args.gamma, train_size=T0)
-        elif interval_method.lower() == "agaci":
-            lo_r, up_r = agaci_ewa(residuals, alpha=args.alpha, train_size=T0,
-                                   gammas=args.agaci_gammas, eta=args.agaci_eta)
-        elif interval_method.lower() == "naive":
-            lo_r, up_r = naive_fixed_intervals(residuals, alpha=args.alpha, train_size=T0)
-        else:
-            row["Notes"] = f"Unknown interval method {interval_method}"
-            return row
-    except Exception as e:
-        row["Notes"] = f"Interval ERROR: {e}"
-        return row
+    # -- 3) Register backend for ACI/AgACI (RF/OLS via models.py OR your 4 models) --
+    model_key = "ds3m"
+    model_key = (model_name or "").lower().strip()
+    # if model_key in {"rf", "ols"}:
+    #     # Original models.py path
+    #     X_backend = X_all.T  # (d, n)
+    #     Y_backend = y_all    # (n,)
+    #     if model_key == "rf":
+    #         basemodel = "RF"
+    #         params_basemodel = {
+    #             "cores": -1,
+    #             "n_estimators": 1000,
+    #             "min_samples_leaf": 1,
+    #             "max_features": 6,
+    #         }
+    #     else:
+    #         basemodel = "OLS"
+    #         params_basemodel = {}
+    #     set_backend_data(
+    #         X_backend, Y_backend,
+    #         basemodel=basemodel,
+    #         params_basemodel=params_basemodel,
+    #         online=True
+    #     )
+    # else:
+        # Custom competitor models path
+    set_backend_series(X_all, y_all)
+        # if model_key == "s4":
+        #     set_backend_model(
+        #         "S4Regressor",
+        #         lags=args.lags,
+        #         device=("cuda" if getattr(args, "device", "cpu") == "cuda" else "cpu"),
+        #         epochs=getattr(args, "s4_epochs", 50),
+        #         batch=getattr(args, "s4_batch", 64),
+        #         lr=getattr(args, "s4_lr", 1e-3),
+        #         weight_decay=getattr(args, "s4_wd", 1e-2),
+        #         n_layers=getattr(args, "s4_layers", 4),
+        #         d_model=getattr(args, "s4_dmodel", 128),
+        #         dropout=getattr(args, "s4_dropout", 0.1),
+        #         amp=(getattr(args, "device", "cpu") == "cuda"),
+        #     )
+        # elif model_key == "gru":
+        #     set_backend_model(
+        #         "MCDropoutGRU",
+        #         lags=args.lags,
+        #         device=("cuda" if getattr(args, "device", "cpu") == "cuda" else "cpu"),
+        #         epochs=getattr(args, "gru_epochs", 50),
+        #         batch=getattr(args, "gru_batch", 128),
+        #         lr=getattr(args, "gru_lr", 1e-3),
+        #         weight_decay=getattr(args, "gru_wd", 1e-4),
+        #         mc_samples=getattr(args, "gru_mc", 30),
+        #         dropout=getattr(args, "gru_dropout", 0.2),
+        #     )
+        # elif model_key == "ruptures":
+        #     set_backend_model(
+        #         "RupturesSegmentedLinear",
+        #         penalty=getattr(args, "rupt_penalty", 10.0),
+        #         min_size=getattr(args, "rupt_min_size", 20),
+        #         model=getattr(args, "rupt_model", "l2"),
+        #     )
+        # elif model_key == "gp":
+        #     set_backend_model(
+        #         "GPTorchSparse",
+        #         lags=args.lags,
+        #         num_inducing=getattr(args, "gp_m", 128),
+        #         iters=getattr(args, "gp_iters", 300),
+        #         lr=getattr(args, "gp_lr", 1e-2),
+        #         device=("cuda" if getattr(args, "device", "cpu") == "cuda" else "cpu"),
+        #     )
+        # elif model_key == "ds3m":
+    set_backend_model(
+        "DS3MWrapper",
+        lags=args.lags,
+        problem=problem,
+        train_size=T0,
+        device=("cuda" if getattr(args, "device", "cpu") == "cuda" else "cpu"),
+        use_cache=True,
+        force_new=False,
+        refit_each_step=False,   # <<< IMPORTANT: fit once, reuse
+    )
 
-    # Slice test tail within the (T0: end) segment
+    # ------------- 4) Build intervals -------------
+    lo_r, up_r = aci_intervals(residuals, alpha=args.alpha, gamma=args.gamma, train_size=T0, args=args)
+
+    # if interval_method.lower() == "aci":
+    #     lo_r, up_r = aci_intervals(residuals, alpha=args.alpha, gamma=args.gamma, train_size=T0)
+    # elif interval_method.lower() == "agaci":
+    #     lo_r, up_r = agaci_ewa(
+    #         residuals, alpha=args.alpha, train_size=T0,
+    #         gammas=getattr(args, "agaci_gammas", [0.005, 0.01, 0.02, 0.05]),
+    #         eta=getattr(args, "agaci_eta", 0.1),
+    #     )
+    # elif interval_method.lower() == "naive":
+    #     lo_r, up_r = naive_fixed_intervals(residuals, alpha=args.alpha, train_size=T0)
+    # else:
+    #     row["Notes"] = f"Unknown interval method {interval_method}"
+    #     return row
+
+
+    # -------- 5) Slice test tail; metrics --------
     y_pred_seg = yhat_all[T0:]
     y_true_seg = y_all[T0:]
     covered = (y_true_seg >= (y_pred_seg - up_r)) & (y_true_seg <= (y_pred_seg + up_r))
@@ -276,21 +360,20 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args, para
     y_pred_test = y_pred_seg[start_test_in_seg:]
     y_true_test = y_true_seg[start_test_in_seg:]
 
-    # Metrics
+    print("Test segment length:", len(y_true_test))
+    print("y_true_test mean/std:", np.mean(y_true_test), np.std(y_true_test))
+    print("y_pred_test mean/std:", np.mean(y_pred_test), np.std(y_pred_test))
+
     row["RMSE"] = rmse(y_true_test, y_pred_test)
     row["Coverage@90"] = float(np.mean(covered_test)) if covered_test.size else float("nan")
     widths = 2.0 * up_r_test
     row["MedianLen"] = median_len(widths)
     row["PctInfinite"] = float(np.mean(np.isinf(up_r_test))) if up_r_test.size else float("nan")
 
-    # Optional note for S4 fallback
-    if model_name.lower() == "s4" and isinstance(reg, S4Regressor) and reg.using_fallback:
+    if (model_key == "s4") and isinstance(reg, S4Regressor) and getattr(reg, "using_fallback", False):
         row["Notes"] = "S4 fallback (Conv1d) used; pass --s4-path to enable real S4D."
 
-    print("llll y_true_test mean/std:", np.mean(y_true_test), np.std(y_true_test))
-    print("llll y_pred_test mean/std:", np.mean(y_pred_test), np.std(y_pred_test))
     return row, y_true_test, y_pred_test, lo_r, up_r, T0, covered_test, widths, interval_method
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -346,6 +429,8 @@ def main():
     )
 
     rows = []
+    print(f"Running experiments for problem={args.models} | device={args.methods}")
+    
     for model_name in args.models:
         for method in args.methods:
             # try:
