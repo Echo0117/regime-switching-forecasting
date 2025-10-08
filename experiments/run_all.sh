@@ -23,21 +23,22 @@ OUTCSV="experiments/results_all_${DEVICE}.csv"
 LAGS="${LAGS:-48}"
 ALPHA="${ALPHA:-0.1}"
 GAMMA="${GAMMA:-0.01}"
-TRAIN_SIZE="${TRAIN_SIZE:-200}"
+TRAIN_SIZE="${TRAIN_SIZE:-1000}"
 
 # Models to run (edit to add/remove)
+# MODELS=("ds3m")
 MODELS=("ds3m")
-# MODELS=("S4" "CPD" "MCDropoutGRU" "GPTorchSparse")
 
 # Interval methods to run
-# METHODS=("ACI")
-METHODS=("ACI" "AgACI" "Naive")
+METHODS=("ACI")
+# METHODS=("Naive" "ACI" "AGACI")
+
 # Datasets to loop
 PROBLEMS=(
-  "Toy"
-  "Sleep"
+  # "Toy"
+  # "Sleep"
   "Unemployment"
-  "Lorenz"
+  # "Lorenz"
   # "Hangzhou"
   # "Seattle"
   # "Pacific"

@@ -16,7 +16,7 @@ from experiments.utils.experiments_utils import (
     plot_results_with_ds3m_aci,
     save_forecast,
 )
-from experiments.utils.acp_utils import agaci_ewa, aci_intervals
+from experiments.utils.acp_utils import aci_intervals, agaci_ewa
 from experiments.utils.ds3m_utils import (
     forecast,
     load_ds3m_data,
@@ -188,19 +188,19 @@ def main() -> None:
     T0 = args.train_size
 
     # use ACI or AgACI
-    # use_agaci = True
-    # if use_agaci:
-    lower_agaci, upper_agaci = agaci_ewa(
-        residuals,
-        alpha=args.alpha,
-        train_size=T0,
-        gammas=[0.005, 0.009, 0.011, 0.015, 0.025, 0.04],
-        # agg="ewa",
-    )
-    # else:
-    lower_r, upper_r = aci_intervals(
-        residuals, alpha=args.alpha, gamma=args.gamma, train_size=T0
-    )
+    use_agaci = False
+    if use_agaci:
+        lower_agaci, upper_agaci = agaci_ewa(
+            residuals,
+            alpha=args.alpha,
+            train_size=T0,
+            gammas=[0.005, 0.009, 0.011, 0.015, 0.025, 0.04],
+            # agg="ewa",
+        )
+    else:
+        lower_r, upper_r = aci_intervals(
+            residuals, alpha=args.alpha, gamma=args.gamma, train_size=T0
+        )
 
     # calculate coverage and width
     y_pred_test = y_pred_1d[T0:]

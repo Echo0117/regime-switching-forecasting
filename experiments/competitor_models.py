@@ -609,7 +609,7 @@ class DS3MWrapper:
         self._test_len = None
 
     # --- private: run / load DS³M forecast and align to harness timeline ----
-    def _get_ds3m_forecast(self, args):
+    def _get_ds3m_forecast(self):
         # Local imports to avoid hard dependency when not used
         from experiments.utils.ds3m_utils import (
             load_ds3m_data, load_ds3m_model, forecast
@@ -619,16 +619,16 @@ class DS3MWrapper:
         )
 
         # Mimic the minimal 'args' needed by load_ds3m_data()
-        # class _Args:
-        #     def __init__(self, problem, train_size):
-        #         self.problem = problem
-        #         self.train_size = train_size
-        # args = _Args(self.problem, self.train_size)
+        class _Args:
+            def __init__(self, problem, train_size):
+                self.problem = problem
+                self.train_size = train_size
+        args = _Args(self.problem, self.train_size)
 
         # 0) try cache
         cached = None
-        # if self.use_cache and not self.force_new:
-        #     cached = load_forecast(self.problem)
+        if self.use_cache and not self.force_new:
+            cached = load_forecast(self.problem)
 
         if cached is None:
             # 1) load DS³M dataset + trained checkpoint
@@ -641,15 +641,36 @@ class DS3MWrapper:
             )
             # 2) one-step prediction on the test block
             res, testForecast_mean, testOriginal, size, d_argmax, uq, lq = forecast(
-                model,
+                model,   
                 ds["testX"], ds["testY"],
-                ds["moments"], ds["d_dim"],
+                ds["train_end"],ds["test_len"],
+                ds["d_dim"],
                 ds["means"], ds["trend"],
-                ds["test_len"], ds["freq"],
+                ds["freq"],
                 ds["RawDataOriginal"],
                 remove_mean=ds["remove_mean"],
                 remove_residual=ds["remove_residual"],
             )
+            # model.eval()  # <- important: disable dropout etc.
+            # res, testForecast_mean, testOriginal, size, d_argmax, uq, lq = forecast(
+            #     model,
+            #     ds["X_all_s"],          # standardized full exogenous matrix (N, x_dim)
+            #     ds["y_all_s"],          # standardized full target (N,)
+            #     ds["train_end"],        # integer split point
+            #     ds["testX"],            # keep passing if your plotting needs it; not used by forecast now
+            #     ds["testY"],            # idem
+            #     ds["moments"],
+            #     ds["d_dim"],
+            #     ds["means"],
+            #     ds["trend"],
+            #     ds["test_len"],
+            #     ds["freq"],
+            #     ds["RawDataOriginal"],
+            #     remove_mean=ds["remove_mean"],
+            #     remove_residual=ds["remove_residual"],
+            #     forecaststep=1,
+            #     MC_S=200,
+            # )
 
             res_dict = dict(
                 y_pred_mean=testForecast_mean,
@@ -671,7 +692,7 @@ class DS3MWrapper:
 
         return res_dict
 
-    def fit(self, X, y, args):
+    def fit(self, X, y):
         """
         Produces aligned predictions for the whole lag-matrix timeline.
         X : array of shape (N, lags)
@@ -681,7 +702,7 @@ class DS3MWrapper:
         N = X.shape[0]
         self._N = N
 
-        res = self._get_ds3m_forecast(args)
+        res = self._get_ds3m_forecast()
         test_len = int(res["test_len"])
         self._test_len = test_len
 
@@ -703,9 +724,9 @@ class DS3MWrapper:
         self._yhat_all = yhat_all
         return self
 
-    def predict(self, X, args):
+    def predict(self, X):
         if self._yhat_all is None:
             # If .fit() wasn’t explicitly called, compute on the fly
-            self.fit(X, np.zeros(len(X), dtype=np.float32), args)
+            self.fit(X, np.zeros(len(X), dtype=np.float32))
         # Return 1D vector of length N (same as y_all)
         return self._yhat_all.copy()

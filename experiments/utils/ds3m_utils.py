@@ -510,6 +510,34 @@ def forecast(
         testForecast_lq,
     )
 
+def _to_np(x):
+    return x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
+
+def ds3m_to_tabular_split(ds, split="train", target_dim=0):
+    """
+    Convert DS3M tensors (L, N, D) -> ACI tabular:
+      X: (N, L*D), y: (N,)
+    Target = next step value at the end of the window: Y[-1, :, target_dim]
+    """
+    X3 = _to_np(ds[f"{split}X"])  # (L, N, D)
+    Y3 = _to_np(ds[f"{split}Y"])  # (L, N, D)
+    L, N, D = X3.shape
+    X2 = X3.transpose(1, 0, 2).reshape(N, L * D)         # (N, L*D)
+    y  = Y3[-1, :, target_dim].reshape(-1)               # (N,)
+    return X2, y
+
+def ds3m_to_tabular_all(ds, target_dim=0):
+    """
+    Concatenate train+valid+test along N, then flatten each window.
+    Use this if you want ACI to run on the entire timeline prepared by DS3M.
+    """
+    X3 = torch.cat([ds["trainX"], ds["validX"], ds["testX"]], dim=1)  # (L, N_total, D)
+    Y3 = torch.cat([ds["trainY"], ds["validY"], ds["testY"]], dim=1)  # (L, N_total, D)
+    X3 = _to_np(X3); Y3 = _to_np(Y3)
+    L, N_total, D = X3.shape
+    X2 = X3.transpose(1, 0, 2).reshape(N_total, L * D)   # (N_total, L*D)
+    y  = Y3[-1, :, target_dim].reshape(-1)               # (N_total,)
+    return X2, y
 
 # %%
 # if restore == False:
