@@ -390,6 +390,10 @@ def load_ds3m_data(args):
     validY = validY.to(device)
     testY = testY.to(device)
 
+    # Set target_dim based on the dataset - default to 0 for single-dim, or predict_dim-1 for multi-dim
+    # For Electricity with 48 dimensions, this would be 47
+    target_dim = predict_dim - 1 if predict_dim > 1 else 0
+
     return {
         "trainX": trainX,
         "trainY": trainY,
@@ -423,6 +427,7 @@ def load_ds3m_data(args):
         "data": data,
         "z_true": z_true if dataname == "Lorenz" else None,
         "learning_rate": learning_rate,
+        "target_dim": target_dim,
     }
 
 

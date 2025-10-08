@@ -86,25 +86,12 @@ def pick_gamma_by_coverage_and_width(
     widths = (up_mat - lo_mat)                 # (n_gamma, eval_len)
     med_width = np.median(widths, axis=1)      # (n_gamma,)
 
-    # target_cov = 1.0 - float(alpha)
-    # cov_err = np.abs(cov_rate - target_cov)
-
-    # # Primary key: coverage error (smaller is better)
-    # # Secondary key: median width (smaller is better)
-    # gid = np.lexsort((med_width, cov_err))[0]
-
     target_cov = 1.0 - float(alpha)
-    eps = 0.01  # 覆盖松弛 1% 可调 0.0~0.02
+    cov_err = np.abs(cov_rate - target_cov)
 
-    feasible = (cov_rate >= target_cov - eps)
-    if feasible.any():
-        cand = np.where(feasible)[0]
-        gid = cand[np.argmin(med_width[cand])]
-    else:
-        # 没可行解时的回退（尽量贴近覆盖，再选最窄）
-        cov_err = np.abs(cov_rate - target_cov)
-        gid = np.lexsort((med_width, cov_err))[0]
-
+    # Primary key: coverage error (smaller is better)
+    # Secondary key: median width (smaller is better)
+    gid = np.lexsort((med_width, cov_err))[0]
 
     lo_full = y_lowers[gid]  # full ACI segment (length test_size_eff)
     up_full = y_uppers[gid]
@@ -140,6 +127,7 @@ def _fetch_ds3m_outputs(args):
     )
     out = dict(
         y_pred_mean=testForecast_mean,  # (test_len, D) or (test_len,)
+        y_true=testOriginal,            # (test_len, D) or (test_len,)
         y_uq=uq,                        # (test_len, D) or (test_len,)
         y_lq=lq,                        # (test_len, D) or (test_len,)
         d_argmax=d_argmax,              # (test_len,)
@@ -152,7 +140,12 @@ def _fetch_ds3m_outputs(args):
 def evaluate_one(problem: str, model_name: str, interval_method: str, args):
     ds = load_ds3m_data(args)
 
-    y_full = np.asarray(ds["RawDataOriginal"]).reshape(-1)
+    # Use the processed data after reshaping (not RawDataOriginal which may have different structure)
+    # ds["data"] has shape (T, D) after RawData.reshape(-1, RawData.shape[2])
+    y_full = np.asarray(ds["data"])  # shape (T, D)
+    if y_full.ndim == 1:
+        y_full = y_full.reshape(-1, 1)
+
     N        = len(y_full)
     test_len = int(ds["test_len"])
     T0       = int(args.aci_train_size)
@@ -176,15 +169,26 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args):
     X_dummy = np.zeros((N, 1), dtype=float)
     y_lowers, y_uppers, tab_alpha_t, gammas = aci_intervals(X_dummy, y_full, args=args)
 
-    gid = int(getattr(args, "gamma_idx", 0))
-    gid = 0 if gid < 0 or gid >= y_lowers.shape[0] else gid
-    lo_full = y_lowers[gid]   # shape (test_len - T0,)
-    up_full = y_uppers[gid]   # shape (test_len - T0,)
+    # gid = int(getattr(args, "gamma_idx", 0))
+    # gid = 0 if gid < 0 or gid >= y_lowers.shape[0] else gid
+    # lo_full = y_lowers[gid]   # shape (test_len - T0,)
+    # up_full = y_uppers[gid]   # shape (test_len - T0,)
+
+    # Extract the target dimension from y_full for ACI evaluation
+    target_dim_aci = int(ds["target_dim"])
+    if y_full.ndim > 1:
+        target_dim_aci = max(0, min(target_dim_aci, y_full.shape[1] - 1))
+        y_full_1d = y_full[:, target_dim_aci]
+    else:
+        y_full_1d = y_full.reshape(-1)
+
+    # Pass only the test tail segment to pick_gamma (ACI operates on tail only)
+    y_tail_1d = y_full_1d[t0_tail:]
 
     gid, lo_full, up_full= pick_gamma_by_coverage_and_width(
     y_lowers=y_lowers,
     y_uppers=y_uppers,
-    y_all=y_full,
+    y_all=y_tail_1d,
     T0=T0,
     alpha=args.alpha,
     gamma_idx=getattr(args, "gamma_idx", None),
@@ -193,7 +197,7 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args):
 
     # Center prediction for RMSE (if you prefer DS³M mean later, swap it in)
     y_pred_eval = 0.5 * (lo_full + up_full)
-    y_true_eval = y_full[eval_lo:eval_hi]
+    y_true_eval = y_full_1d[eval_lo:eval_hi]
     covered_eval = (y_true_eval >= lo_full) & (y_true_eval <= up_full)
     widths_eval  = (up_full - lo_full)
 
@@ -227,6 +231,20 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args):
     print(f"[{problem}] {model_name} + {interval_method} -> "
           f"RMSE={row['RMSE']:.4f} | Cov={row['Coverage@90']:.3f} | "
           f"MedLen={row['MedianLen']:.3f} | %Inf={row['PctInfinite']:.3f} | {row['Notes']}")
+    
+    print(f"  ACI gammas: {gammas}, selected gamma index: {gid}, value: {gammas[gid] if gid is not None and 0 <= gid < len(gammas) else 'N/A'}"
+          )
+    print(f"  ACI alphas: {tab_alpha_t}")
+    print(f"  ACI lower bounds: {y_lowers}")
+    print(f"  ACI upper bounds: {y_uppers}")
+    print(f"  ds3m_lq_eval predictions: {ds3m_lq_eval}")
+    print(f"  ds3m_uq_eval predictions: {ds3m_uq_eval}")
+
+    # Get full test data for plotting (not just eval segment)
+    y_true_full = np.asarray(res["y_true"])
+    y_pred_full = np.asarray(res["y_pred_mean"])
+    y_uq_full_plot = np.asarray(res["y_uq"])
+    y_lq_full_plot = np.asarray(res["y_lq"])
 
     return (
         row,
@@ -242,6 +260,11 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args):
         ds3m_uq_eval,
         ds["d_dim"],
         ds3m_d_argmax_eval,
+        target_dim_aci,
+        y_true_full,
+        y_pred_full,
+        y_uq_full_plot,
+        y_lq_full_plot,
     )
 
 
@@ -257,7 +280,7 @@ def main():
     ap.add_argument("--train_size", type=int, default=1000)
 
     ap.add_argument("--agaci", action="store_true")  # (unused here; we sweep methods)
-    ap.add_argument("--agaci_gammas", type=float, nargs="*", default=[0.005, 0.01, 0.02, 0.05])
+    ap.add_argument("--agaci_gammas", type=float, nargs="*", default=[0.0025, 0.005, 0.01, 0.02, 0.05])
     ap.add_argument("--agaci_eta", type=float, default=0.1)
 
     # Device / S4
@@ -271,7 +294,7 @@ def main():
     ap.add_argument("--aci_train_size", type=int, default=20, help="T0 used as calibration size for ACP")
     ap.add_argument("--force-new", action="store_true", help="Ignore cache and recompute forecast")
     ap.add_argument("--alpha", type=float, default=0.1, help="Miscoverage level 1-alpha, e.g. 0.1 for 90% PI")
-    ap.add_argument("--tab-gamma", type=float, nargs="*", default=[0.005, 0.01, 0.02, 0.05], help="ACI step sizes")
+    ap.add_argument("--tab-gamma", type=float, nargs="*", default=[0.0025, 0.005, 0.01, 0.02, 0.05], help="ACI step sizes")
 
     # ap.add_argument("--models", nargs="*", default=["S4","CPD","MCDropoutGRU","GPTorchSparse","DS3M"])
     # ap.add_argument("--methods", nargs="*", default=["ACI","AgACI","Naive"])
@@ -298,44 +321,56 @@ def main():
         for method in args.methods:
             # try:
             
-            row, y_true, y_pred_mean, lower_r, upper_r, T0, coverage, width, method_name, y_lq, y_uq, d_dim, forecast_d_MC_argmax = \
+            row, _, _, lower_r, upper_r, T0, _, _, method_name, _, _, d_dim, _, target_dim_aci, y_true_full, y_pred_full, y_uq_full_plot, y_lq_full_plot = \
             evaluate_one(args.problem, model_name, method, args)
-            # except Exception as e:
-            #     row = {
-            #         "Problem": args.problem, "Model": model_name, "IntervalMethod": method,
-            #         "RMSE": float("nan"), "Coverage@90": float("nan"),
-            #         "MedianLen": float("nan"), "PctInfinite": float("nan"),
-            #         "Notes": f"FATAL: {e}",
-            #     }
-            print(f"[{args.problem}] {model_name} + {method} -> "
-                  f"RMSE={row['RMSE']:.4f} | Cov={row['Coverage@90']:.3f} | "
-                  f"MedLen={row['MedianLen']:.3f} | %Inf={row['PctInfinite']:.3f} | {row['Notes']}")
+            # print(f"[{args.problem}] {model_name} + {method} -> "
+            #       f"RMSE={row['RMSE']:.4f} | Cov={row['Coverage@90']:.3f} | "
+            #       f"MedLen={row['MedianLen']:.3f} | %Inf={row['PctInfinite']:.3f} | {row['Notes']}")
             rows.append(row)
 
             print(f"Plotting {model_name} + {method} ...")
 
+            # plot_results_with_aci(
+            #     dataname=args.problem,
+            #     testOriginal=y_true,
+            #     testForecast_mean=y_pred_mean,
+            #     d_dim=d_dim,                       
+            #     forecast_d_MC_argmax=forecast_d_MC_argmax,
+            #     # No DS3M intervals
+            #     dsm_lower=y_lq, dsm_upper=y_uq,
+            #     # No model intervals
+            #     model_lower=None, model_upper=None, model_interval_label=None,
+            #     # ACI series
+            #     aci_lower=lower_r,                
+            #     aci_upper=upper_r,
+            #     T0=T0,
+            #     target_dim=0,
+            #     coverage=float(row["Coverage@90"]),  # <- ensure scalar
+            #     width=float(row["MedianLen"]),       # <- ensure scalar
+            #     model_name=model_name,
+            #     interval_method_name=method_name,  # "ACI" | "AgACI" | "Naive"
+            #     save_dir_root="figures",
+            #     show=True,
+            # )
             plot_results_with_aci(
                 dataname=args.problem,
-                testOriginal=y_true,
-                testForecast_mean=y_pred_mean,
-                d_dim=d_dim,                       
-                forecast_d_MC_argmax=forecast_d_MC_argmax,
-                # No DS3M intervals
-                dsm_lower=y_lq, dsm_upper=y_uq,
-                # No model intervals
-                model_lower=None, model_upper=None, model_interval_label=None,
-                # ACI series
-                aci_lower=lower_r,                
+                testOriginal=y_true_full,
+                testForecast_mean=y_pred_full,
+                d_dim=d_dim,
+                dsm_lower=y_lq_full_plot,
+                dsm_upper=y_uq_full_plot,
+                aci_lower=lower_r,
                 aci_upper=upper_r,
                 T0=T0,
-                target_dim=0,
-                coverage=float(row["Coverage@90"]),  # <- ensure scalar
-                width=float(row["MedianLen"]),       # <- ensure scalar
+                target_dim=target_dim_aci,
+                coverage=float(row["Coverage@90"]),
+                width=float(row["MedianLen"]),
                 model_name=model_name,
                 interval_method_name=method_name,  # "ACI" | "AgACI" | "Naive"
                 save_dir_root="figures",
                 show=True,
             )
+
     out = args.csv
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     with open(out, "w", newline="") as f:
