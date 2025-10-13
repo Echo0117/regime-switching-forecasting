@@ -213,16 +213,27 @@ def plot_results_with_ds3m_aci(
     # ====== optionally: draw regime heatmap ======
     if forecast_d_MC_argmax is not None:
         try:
+            # Use exact same style as original DS3M code (main.py:728)
             cmap_states = plt.get_cmap("RdBu", d_dim if d_dim is not None else 2)
             plt.figure(figsize=(10, 1.8))
+
+            # Normalize to [0, 1] range for visualization
+            # For d_dim=2: invert using (1 - arr) like original code
+            # For d_dim>2: normalize to [0, 1]
+            arr = forecast_d_MC_argmax
+            if d_dim == 2:
+                arr_normalized = 1 - arr
+            else:
+                arr_normalized = (d_dim - 1 - arr) / (d_dim - 1) if d_dim > 1 else arr
+
             sns.heatmap(
-                forecast_d_MC_argmax.reshape(1, -1),
+                arr_normalized.reshape(1, -1),
                 linewidth=0,
                 cbar=False,
                 alpha=1,
                 cmap=cmap_states,
                 vmin=0,
-                vmax=(d_dim - 1 if d_dim is not None else 1),
+                vmax=1,
             )
             plt.title("{} DS³M discrete states (regime)".format(dataname))
             plt.yticks([])

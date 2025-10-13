@@ -13,9 +13,18 @@ for p in [HERE, PROJ]:
         sys.path.insert(0, p)
 
 # from experiments.ds3m_wrapper import DS3MWrapper
-from experiments.utils.acp_utils import aci_intervals
-from experiments.utils.ds3m_utils import ds3m_to_tabular_all, forecast, load_ds3m_data, load_ds3m_model
+from experiments.utils.acp_utils import aci_intervals, agaci_intervals
+from experiments.utils.ds3m_utils import ds3m_to_tabular_all, forecast, load_ds3m_data, load_ds3m_model, get_full_d_argmax
 from experiments.utils.plot_utils import plot_results_with_aci
+from experiments.utils.regime_switch_analysis import (
+    plot_agaci_weights_at_switches,
+    plot_coverage_at_switches,
+    plot_coverage_full_timeline,
+    plot_coverage_vs_length_tradeoff,
+    plot_regime_heatmap_full,
+    detect_regime_switches,
+    load_timestamps_for_dataset
+)
 from experiments.ds3m_wrapper import build_model
 
 # ---------------------------
@@ -107,6 +116,7 @@ def _fetch_ds3m_outputs(args):
     """
     Compute DS³M forecast once (no rolling), return a dict with
     y_pred_mean, y_uq, y_lq, d_argmax, test_len, predict_dim.
+    Also returns d_argmax_full for the entire dataset (train+valid+test).
     """
     ds = load_ds3m_data(args)
     model = load_ds3m_model(
@@ -125,14 +135,21 @@ def _fetch_ds3m_outputs(args):
         remove_mean=ds["remove_mean"],
         remove_residual=ds["remove_residual"],
     )
+
+    # Get d_argmax for full dataset (train+valid+test)
+    d_argmax_full = get_full_d_argmax(model, ds)
+
     out = dict(
         y_pred_mean=testForecast_mean,  # (test_len, D) or (test_len,)
         y_true=testOriginal,            # (test_len, D) or (test_len,)
         y_uq=uq,                        # (test_len, D) or (test_len,)
         y_lq=lq,                        # (test_len, D) or (test_len,)
         d_argmax=d_argmax,              # (test_len,)
+        d_argmax_full=d_argmax_full,    # (N_total,) - full dataset
         test_len=ds["test_len"],
         predict_dim=ds["predict_dim"],
+        model=model,                     # For potential reuse
+        ds=ds,                          # Full dataset info
     )
     return out
 
@@ -165,16 +182,10 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args):
         "Notes": "",
     }
 
-    # --- ACI bounds over the tail AFTER T0 ---
+    # --- Run ACI or AgACI based on method ---
     X_dummy = np.zeros((N, 1), dtype=float)
-    y_lowers, y_uppers, tab_alpha_t, gammas = aci_intervals(X_dummy, y_full, args=args)
 
-    # gid = int(getattr(args, "gamma_idx", 0))
-    # gid = 0 if gid < 0 or gid >= y_lowers.shape[0] else gid
-    # lo_full = y_lowers[gid]   # shape (test_len - T0,)
-    # up_full = y_uppers[gid]   # shape (test_len - T0,)
-
-    # Extract the target dimension from y_full for ACI evaluation
+    # Extract the target dimension from y_full for evaluation
     target_dim_aci = int(ds["target_dim"])
     if y_full.ndim > 1:
         target_dim_aci = max(0, min(target_dim_aci, y_full.shape[1] - 1))
@@ -182,27 +193,17 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args):
     else:
         y_full_1d = y_full.reshape(-1)
 
-    # Pass only the test tail segment to pick_gamma (ACI operates on tail only)
+    # Pass only the test tail segment (ACI operates on tail only)
     y_tail_1d = y_full_1d[t0_tail:]
 
-    gid, lo_full, up_full= pick_gamma_by_coverage_and_width(
-    y_lowers=y_lowers,
-    y_uppers=y_uppers,
-    y_all=y_tail_1d,
-    T0=T0,
-    alpha=args.alpha,
-    gamma_idx=getattr(args, "gamma_idx", None),
-    skip_eval_head=getattr(args, "skip_eval_head", 0)  # e.g., 50
-)
+    agaci_weights_lower = None
+    agaci_weights_upper = None
+    y_lowers = None
+    y_uppers = None
+    gammas = None
+    gid = None
 
-    # Center prediction for RMSE (if you prefer DS³M mean later, swap it in)
-    y_pred_eval = 0.5 * (lo_full + up_full)
-    y_true_eval = y_full_1d[eval_lo:eval_hi]
-    covered_eval = (y_true_eval >= lo_full) & (y_true_eval <= up_full)
-    widths_eval  = (up_full - lo_full)
-
-    # --- Fetch DS³M uq/lq and d-argmax for comparison and slice to the SAME eval segment ---
- 
+    # --- Fetch DS³M uq/lq and d-argmax first (needed for Naive method) ---
     ds3m = build_model(args)
     res = getattr(ds3m, "_get_ds3m_forecast", lambda a: None)(args)
     res = _fetch_ds3m_outputs(args)
@@ -212,11 +213,66 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args):
     y_lq_full = np.asarray(res["y_lq"])
     if y_uq_full.ndim == 1: y_uq_full = y_uq_full[:, None]
     if y_lq_full.ndim == 1: y_lq_full = y_lq_full[:, None]
+
+    if interval_method.upper() == "NAIVE":
+        # Naive: use DS3M's original Monte Carlo intervals (testForecast_uq, testForecast_lq)
+        # Use FULL test set intervals without slicing (same as test_agaci.py)
+        print("[Naive] Using DS3M MC intervals (full test set)")
+        td = target_dim_aci
+        td = np.clip(td, 0, y_uq_full.shape[1]-1)
+        # Extract full test set intervals (no slicing)
+        lo_full_naive = y_lq_full[:, td]     # Full test set, length = test_len
+        up_full_naive = y_uq_full[:, td]     # Full test set, length = test_len
+
+        # Debug: Print range to verify it matches test_agaci.py
+        print(f"[Naive] Full test set: {len(lo_full_naive)} points, range=[{np.min(lo_full_naive):.2f}, {np.max(up_full_naive):.2f}]")
+
+        # For evaluation, slice from T0 onwards
+        lo_full = lo_full_naive[T0:]         # length = test_len - T0
+        up_full = up_full_naive[T0:]         # length = test_len - T0
+        gid = None
+
+    elif interval_method.upper() == "AGACI":
+        # Run AgACI with BOA aggregation
+        agaci_results = agaci_intervals(X_dummy, y_full, basemodel="ds3m", args=args)
+
+        lo_full = agaci_results['lower']
+        up_full = agaci_results['upper']
+        agaci_weights_lower = agaci_results['weights_lower']
+        agaci_weights_upper = agaci_results['weights_upper']
+        y_lowers = agaci_results['y_lowers_experts']
+        y_uppers = agaci_results['y_uppers_experts']
+        gammas = agaci_results['gammas']
+        tab_alpha_t = agaci_results['tab_alpha_t']
+        gid = None  # AgACI doesn't select a single gamma
+
+    else:
+        # ACI: Run standard ACI with multiple gammas and select best
+        y_lowers, y_uppers, tab_alpha_t, gammas = aci_intervals(X_dummy, y_full, args=args)
+
+        # Select best gamma based on coverage and width
+        gid, lo_full, up_full = pick_gamma_by_coverage_and_width(
+            y_lowers=y_lowers,
+            y_uppers=y_uppers,
+            y_all=y_tail_1d,
+            T0=T0,
+            alpha=args.alpha,
+            gamma_idx=getattr(args, "gamma_idx", None),
+            skip_eval_head=getattr(args, "skip_eval_head", 0)
+        )
+
+    # Center prediction for RMSE (if you prefer DS³M mean later, swap it in)
+    y_pred_eval = 0.5 * (lo_full + up_full)
+    y_true_eval = y_full_1d[eval_lo:eval_hi]
+    covered_eval = (y_true_eval >= lo_full) & (y_true_eval <= up_full)
+    widths_eval  = (up_full - lo_full)
+
+    # --- Get d-argmax for regime analysis ---
     td = 0  # or args.target_dim
     td = np.clip(td, 0, y_uq_full.shape[1]-1)
     ds3m_uq_eval = y_uq_full[T0:, td]     # length = eval_len
     ds3m_lq_eval = y_lq_full[T0:, td]     # length = eval_len
-    d_argmax_full = np.asarray(res["d_argmax"]).reshape(-1)
+    d_argmax_full = np.asarray(res.get("d_argmax_full", res["d_argmax"])).reshape(-1)
     ds3m_d_argmax_eval = d_argmax_full[T0:] if d_argmax_full.size >= T0 else None
 
     # --- Metrics ---
@@ -231,20 +287,29 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args):
     print(f"[{problem}] {model_name} + {interval_method} -> "
           f"RMSE={row['RMSE']:.4f} | Cov={row['Coverage@90']:.3f} | "
           f"MedLen={row['MedianLen']:.3f} | %Inf={row['PctInfinite']:.3f} | {row['Notes']}")
-    
-    print(f"  ACI gammas: {gammas}, selected gamma index: {gid}, value: {gammas[gid] if gid is not None and 0 <= gid < len(gammas) else 'N/A'}"
-          )
-    print(f"  ACI alphas: {tab_alpha_t}")
-    print(f"  ACI lower bounds: {y_lowers}")
-    print(f"  ACI upper bounds: {y_uppers}")
-    print(f"  ds3m_lq_eval predictions: {ds3m_lq_eval}")
-    print(f"  ds3m_uq_eval predictions: {ds3m_uq_eval}")
 
     # Get full test data for plotting (not just eval segment)
     y_true_full = np.asarray(res["y_true"])
     y_pred_full = np.asarray(res["y_pred_mean"])
     y_uq_full_plot = np.asarray(res["y_uq"])
     y_lq_full_plot = np.asarray(res["y_lq"])
+
+    # Get d_argmax_full from DS3M outputs
+    d_argmax_full = res.get("d_argmax_full", None)
+
+    # Create padded intervals for plotting (aligned with full test set)
+    # This matches test_agaci.py approach: pad first T0 positions with NaN
+    lo_full_padded = np.full(test_len, np.nan)
+    up_full_padded = np.full(test_len, np.nan)
+
+    if interval_method.upper() == "NAIVE":
+        # For Naive, use full DS3M intervals (already computed above)
+        lo_full_padded = lo_full_naive
+        up_full_padded = up_full_naive
+    else:
+        # For ACI/AgACI, pad with NaN in first T0 positions
+        lo_full_padded[T0:] = lo_full
+        up_full_padded[T0:] = up_full
 
     return (
         row,
@@ -265,6 +330,14 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args):
         y_pred_full,
         y_uq_full_plot,
         y_lq_full_plot,
+        agaci_weights_lower,
+        agaci_weights_upper,
+        gammas,
+        d_argmax_full,
+        y_lowers if interval_method.upper() != "AGACI" else y_lowers,
+        y_uppers if interval_method.upper() != "AGACI" else y_uppers,
+        lo_full_padded,  # For plotting with full test set alignment
+        up_full_padded,  # For plotting with full test set alignment
     )
 
 
@@ -315,14 +388,47 @@ def main():
         pass
 
     rows = []
+    all_results = {}  # Store results for regime analysis
     print(f"Running experiments for problem={args.models} | device={args.methods}")
-    
+
     for model_name in args.models:
         for method in args.methods:
             # try:
-            
-            row, _, _, lower_r, upper_r, T0, _, _, method_name, _, _, d_dim, _, target_dim_aci, y_true_full, y_pred_full, y_uq_full_plot, y_lq_full_plot = \
-            evaluate_one(args.problem, model_name, method, args)
+
+            results = evaluate_one(args.problem, model_name, method, args)
+            row = results[0]
+            lower_r = results[3]
+            upper_r = results[4]
+            T0 = results[5]
+            method_name = results[8]
+            d_dim = results[11]
+            target_dim_aci = results[13]
+            y_true_full = results[14]
+            y_pred_full = results[15]
+            y_uq_full_plot = results[16]
+            y_lq_full_plot = results[17]
+            agaci_weights_lower = results[18]
+            agaci_weights_upper = results[19]
+            gammas = results[20]
+            d_argmax_full = results[21]
+            y_lowers_all = results[22]
+            y_uppers_all = results[23]
+            lower_padded = results[24]  # New: padded intervals for plotting
+            upper_padded = results[25]  # New: padded intervals for plotting
+
+            # Store for regime analysis
+            # Use padded intervals for plotting (aligned with full test set)
+            all_results[method_name] = {
+                'lower': lower_padded,  # Changed: use padded instead of sliced
+                'upper': upper_padded,  # Changed: use padded instead of sliced
+                'agaci_weights_lower': agaci_weights_lower,
+                'agaci_weights_upper': agaci_weights_upper,
+                'gammas': gammas,
+                'y_lowers_all': y_lowers_all,
+                'y_uppers_all': y_uppers_all,
+                'row': row,
+            }
+
             # print(f"[{args.problem}] {model_name} + {method} -> "
             #       f"RMSE={row['RMSE']:.4f} | Cov={row['Coverage@90']:.3f} | "
             #       f"MedLen={row['MedianLen']:.3f} | %Inf={row['PctInfinite']:.3f} | {row['Notes']}")
@@ -352,11 +458,21 @@ def main():
             #     save_dir_root="figures",
             #     show=True,
             # )
+
+            # Debug: Check d_argmax_full values
+            if d_argmax_full is not None:
+                print(f"\n[DEBUG] d_argmax_full stats:")
+                print(f"  Shape: {d_argmax_full.shape}")
+                print(f"  Min: {d_argmax_full.min()}, Max: {d_argmax_full.max()}")
+                print(f"  Unique values: {np.unique(d_argmax_full)}")
+                print(f"  d_dim: {d_dim}")
+
             plot_results_with_aci(
                 dataname=args.problem,
                 testOriginal=y_true_full,
                 testForecast_mean=y_pred_full,
                 d_dim=d_dim,
+                forecast_d_MC_argmax=d_argmax_full,
                 dsm_lower=y_lq_full_plot,
                 dsm_upper=y_uq_full_plot,
                 aci_lower=lower_r,
@@ -371,6 +487,145 @@ def main():
                 show=True,
             )
 
+    # =========================================================================
+    # REGIME SWITCHING ANALYSIS
+    # =========================================================================
+    print("\n" + "="*60)
+    print("Regime Switching Analysis")
+    print("="*60)
+
+    if d_argmax_full is not None and len(d_argmax_full) > 0:
+        regime_save_dir = f"figures/regime_analysis/{args.problem}"
+        os.makedirs(regime_save_dir, exist_ok=True)
+
+        # 1a. Plot regime heatmap for full dataset (all windows)
+        print("\n1a. Plotting regime heatmap for full dataset (all windows)...")
+        ds = load_ds3m_data(args)
+        N_full = len(ds["data"])
+        test_len = int(ds["test_len"])
+        test_start_idx = N_full - test_len
+
+        plot_regime_heatmap_full(
+            d_argmax=d_argmax_full,
+            d_dim=d_dim,
+            dataname=args.problem,
+            timestamps=None,  # Can't use timestamps for full window sequence
+            save_path=f"{regime_save_dir}/regime_heatmap_full.png",
+            plot_scope="full",
+            test_start_idx=test_start_idx
+        )
+
+        # 1b. Plot regime heatmap for test set only (with real timestamps)
+        print("\n1b. Plotting regime heatmap for test set only (with timestamps)...")
+        res_ds3m = _fetch_ds3m_outputs(args)
+        d_argmax_test = np.asarray(res_ds3m["d_argmax"]).reshape(-1)
+        timestamps_test = load_timestamps_for_dataset(args.problem, test_len, from_end=True)
+
+        plot_regime_heatmap_full(
+            d_argmax=d_argmax_test,
+            d_dim=d_dim,
+            dataname=args.problem,
+            timestamps=timestamps_test,
+            save_path=f"{regime_save_dir}/regime_heatmap_test.png",
+            plot_scope="test"
+        )
+
+        # 2. Plot AgACI weights at regime switches
+        if 'AgACI' in all_results and all_results['AgACI']['agaci_weights_lower'] is not None:
+            print("\n2. Plotting AgACI weights at regime switches...")
+            agaci_weights = all_results['AgACI']['agaci_weights_lower']  # shape (T, n_gammas)
+            gammas_list = all_results['AgACI']['gammas']
+
+            # Transpose to (n_gammas, T) for plotting
+            agaci_weights_t = agaci_weights.T if agaci_weights.ndim == 2 else agaci_weights
+
+            plot_agaci_weights_at_switches(
+                agaci_weights=agaci_weights_t,
+                d_argmax=d_argmax_full,
+                gamma_values=gammas_list,
+                window_before=10,
+                window_after=50,
+                save_path=f"{regime_save_dir}/agaci_weights_switches.png",
+                show_individual_lines=True
+            )
+
+        # 3. Plot coverage at regime switches
+        print("\n3. Plotting coverage at regime switches...")
+
+        # Need y_true for test set (to align with intervals)
+        ds = load_ds3m_data(args)
+        y_full_data = np.asarray(ds["data"])
+        if y_full_data.ndim > 1:
+            y_full_data = y_full_data[:, target_dim_aci]
+
+        # Get test set portion
+        N = len(y_full_data)
+        test_len = int(ds["test_len"])
+        t0_tail = N - test_len
+
+        # Extract test set (to align with padded intervals)
+        y_true_test = y_true_full  # This is already the test set from DS3M output
+        if y_true_test.ndim > 1:
+            y_true_test = y_true_test[:, target_dim_aci]
+
+        # Get d_argmax for test set from DS3M output
+        # res["d_argmax"] contains the test set regimes (length = test_len)
+        res_ds3m = _fetch_ds3m_outputs(args)
+        d_argmax_test = np.asarray(res_ds3m["d_argmax"]).reshape(-1)  # Test set regimes
+
+        # Build intervals dict (padded intervals aligned with test set)
+        intervals_for_coverage = {}
+        for method_name, res_dict in all_results.items():
+            lower_arr = res_dict['lower']  # Padded intervals, length = test_len
+            upper_arr = res_dict['upper']  # Padded intervals, length = test_len
+
+            # Debug: Check if intervals are different
+            print(f"  {method_name}: lower shape={lower_arr.shape}, "
+                  f"mean={np.nanmean(lower_arr):.4f}, std={np.nanstd(lower_arr):.4f}")
+            print(f"  {method_name}: upper shape={upper_arr.shape}, "
+                  f"mean={np.nanmean(upper_arr):.4f}, std={np.nanstd(upper_arr):.4f}")
+
+            intervals_for_coverage[method_name] = (lower_arr, upper_arr)
+
+        # 3a: Windowed coverage around switches
+        plot_coverage_at_switches(
+            intervals_dict=intervals_for_coverage,
+            y_true=y_true_test,  # Full test set
+            d_argmax=d_argmax_test,  # Test set regimes
+            window_before=10,
+            window_after=50,
+            save_path=f"{regime_save_dir}/coverage_at_switches.png"
+        )
+
+        # 3b: Full timeline coverage
+        print("\n3b. Plotting coverage over full timeline...")
+        plot_coverage_full_timeline(
+            intervals_dict=intervals_for_coverage,
+            y_true=y_true_test,  # Full test set
+            d_argmax=d_argmax_test,  # Test set regimes
+            timestamps=timestamps_test,  # Use same timestamps as test heatmap
+            save_path=f"{regime_save_dir}/coverage_full_timeline.png"
+        )
+
+        # 4. Plot coverage vs length tradeoff
+        print("\n4. Plotting coverage vs length tradeoff...")
+        tradeoff_dict = {}
+        for method_name, res_dict in all_results.items():
+            row = res_dict['row']
+            tradeoff_dict[method_name] = (row['Coverage@90'], row['MedianLen'])
+
+        plot_coverage_vs_length_tradeoff(
+            results_dict=tradeoff_dict,
+            save_path=f"{regime_save_dir}/tradeoff.png"
+        )
+
+        print(f"\n{'='*60}")
+        print(f"Regime analysis plots saved to: {regime_save_dir}/")
+        print(f"{'='*60}")
+
+    # =========================================================================
+    # Save CSV
+    # =========================================================================
     out = args.csv
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     with open(out, "w", newline="") as f:

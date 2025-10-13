@@ -544,6 +544,47 @@ def ds3m_to_tabular_all(ds, target_dim=0):
     y  = Y3[-1, :, target_dim].reshape(-1)               # (N_total,)
     return X2, y
 
+
+def get_full_d_argmax(model, ds, forecaststep=1, MC_S=200):
+    """
+    Get d_argmax (regime indicators) for the entire dataset (train+valid+test).
+
+    Parameters
+    ----------
+    model : DSSSM
+        Trained DS3M model
+    ds : dict
+        Dataset dictionary from load_ds3m_data
+    forecaststep : int
+        Forecast horizon (typically 1)
+    MC_S : int
+        Number of Monte Carlo samples
+
+    Returns
+    -------
+    d_argmax_full : np.ndarray, shape (N_total,)
+        Regime indicators for full dataset (train+valid+test combined)
+    """
+    d_dim = ds["d_dim"]
+
+    # Concatenate all splits
+    X_full = torch.cat([ds["trainX"], ds["validX"], ds["testX"]], dim=1)  # (L, N_total, D)
+    Y_full = torch.cat([ds["trainY"], ds["validY"], ds["testY"]], dim=1)  # (L, N_total, D)
+
+    # Run forecasting to get regime indicators
+    with torch.no_grad():
+        forecast_MC, forecast_d_MC, forecast_z_MC = model._forecastingMultiStep(
+            X_full, Y_full, forecaststep, MC_S
+        )
+
+    # Extract d_argmax (most likely regime at each timestep)
+    forecast_d_MC_argmax = []
+    for i in range(d_dim):
+        forecast_d_MC_argmax.append(np.sum(forecast_d_MC[:, -1, :, :] == i, axis=0))
+    d_argmax_full = np.argmax(np.array(forecast_d_MC_argmax), axis=0).reshape(-1)
+
+    return d_argmax_full
+
 # %%
 # if restore == False:
 
