@@ -28,6 +28,7 @@ from experiments.utils.regime_switch_analysis import (
     plot_agaci_weights_at_switches,
     plot_coverage_at_switches,
     plot_coverage_full_timeline,
+    plot_coverage_timeline_scatter,
     plot_coverage_vs_length_tradeoff,
     plot_regime_heatmap_full,
     load_timestamps_for_dataset
@@ -156,6 +157,10 @@ def main():
     print("\n" + "="*60)
     print("Running AgACI...")
     print("="*60)
+    print("[WEIGHTS FLOW] Starting AgACI aggregation")
+    print(f"[WEIGHTS FLOW] Number of gamma experts: {len(gammas_aci)}")
+    print(f"[WEIGHTS FLOW] Gamma values: {gammas_aci}")
+    print(f"[WEIGHTS FLOW] Learning rate (eta): {args.agaci_eta}")
 
     agaci_results = agaci_intervals(
         X_dummy, y_full, basemodel="ds3m", args=args
@@ -166,8 +171,15 @@ def main():
     weights_lower = agaci_results['weights_lower']
     weights_upper = agaci_results['weights_upper']
 
-    print(f"AgACI completed.")
-    print(f"  Coverage: {agaci_results['coverage']:.3f}")
+    print(f"\n[WEIGHTS FLOW] AgACI completed.")
+    print(f"[WEIGHTS FLOW] Output weights_lower shape: {weights_lower.shape}")
+    print(f"[WEIGHTS FLOW] Output weights_upper shape: {weights_upper.shape}")
+    print(f"[WEIGHTS FLOW] Weights_lower summary:")
+    print(f"[WEIGHTS FLOW]   - Initial weights (t=0): {weights_lower[0]}")
+    print(f"[WEIGHTS FLOW]   - Final weights (t={len(weights_lower)-1}): {weights_lower[-1]}")
+    print(f"[WEIGHTS FLOW]   - Mean weights over time: {np.mean(weights_lower, axis=0)}")
+    print(f"[WEIGHTS FLOW]   - Std weights over time: {np.std(weights_lower, axis=0)}")
+    print(f"\n  Coverage: {agaci_results['coverage']:.3f}")
     print(f"  Median length: {agaci_results['median_length']:.2f}")
 
     # Debug: Check if AgACI is different from ACI
@@ -245,8 +257,8 @@ def main():
         agaci_weights=weights_lower_full,  # (n_gammas, N_full) with NaN padding
         d_argmax=d_argmax_full,  # Use full dataset regimes
         gamma_values=gammas_aci,
-        window_before=10,
-        window_after=50,
+        # window_before and window_after will be computed adaptively
+        adaptive_window=True,  # Enable adaptive window sizing
         save_path=f"{save_dir}/agaci_weights_switches.png"
     )
 
@@ -281,19 +293,28 @@ def main():
         intervals_dict,
         y_true,
         d_argmax_test,  # Use test regime for coverage analysis
-        window_before=10,
-        window_after=50,
+        adaptive_window=True,  # Use adaptive window sizing
         save_path=f"{save_dir}/coverage_at_switches.png"
     )
 
-    # Plot 2b: Full timeline coverage
-    print("\n2b. Plotting coverage over full timeline...")
+    # Plot 2b: Full timeline coverage (bar chart)
+    print("\n2b. Plotting coverage over full timeline (bar chart)...")
     plot_coverage_full_timeline(
         intervals_dict,
         y_true,
         d_argmax_test,  # Use test regime for coverage analysis
         timestamps=timestamps_test,  # Use same timestamps as test heatmap
         save_path=f"{save_dir}/coverage_full_timeline.png"
+    )
+
+    # Plot 2c: Full timeline coverage (scatter plot)
+    print("\n2c. Plotting coverage over full timeline (scatter plot)...")
+    plot_coverage_timeline_scatter(
+        intervals_dict,
+        y_true,
+        d_argmax_test,  # Use test regime for coverage analysis
+        timestamps=timestamps_test,  # Use same timestamps as test heatmap
+        save_path=f"{save_dir}/coverage_timeline_scatter.png"
     )
 
     # Plot 3: Tradeoff plot

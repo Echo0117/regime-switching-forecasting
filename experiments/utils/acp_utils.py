@@ -6,7 +6,7 @@ from typing import Tuple, Dict, Optional
 # Import the ORIGINAL ACI implementation you pasted:
 # Make sure this import path points to the module where fit_predict lives.
 from AdaptiveConformalPredictionsTimeSeries.models import fit_predict, fit_predict_ACPs  # adjust path if needed
-from AdaptiveConformalPredictionsTimeSeries.agaci import agaci_intervals as run_agaci
+from AdaptiveConformalPredictionsTimeSeries.agaci import run_agaci
 
 def aci_intervals(
     X: np.ndarray,            # (N, D) features, time-major
@@ -112,14 +112,32 @@ def agaci_intervals(
     eta = float(getattr(args, 'agaci_eta', 0.1))
     use_gradient = bool(getattr(args, 'agaci_gradient', True))
 
+    print(f"\n[ACP_UTILS] Preparing to call AgACI core function")
+    print(f"[ACP_UTILS] Expert intervals shapes:")
+    print(f"[ACP_UTILS]   - y_lowers_experts: {y_lowers_experts.shape}")
+    print(f"[ACP_UTILS]   - y_uppers_experts: {y_uppers_experts.shape}")
+    print(f"[ACP_UTILS]   - y_true_test: {y_true_test.shape}")
+    print(f"[ACP_UTILS] Parameters:")
+    print(f"[ACP_UTILS]   - alpha: {args.alpha}")
+    print(f"[ACP_UTILS]   - eta (learning rate): {eta}")
+    print(f"[ACP_UTILS]   - use_gradient: {use_gradient}")
+    print(f"[ACP_UTILS] Expert lower bound ranges:")
+    for i, gamma in enumerate(gammas):
+        print(f"[ACP_UTILS]   - Expert {i} (gamma={gamma[0]:.4f}): "
+              f"[{np.min(y_lowers_experts[i]):.2f}, {np.max(y_lowers_experts[i]):.2f}]")
+
     agaci_results = run_agaci(
         y_lowers_experts,
         y_uppers_experts,
         y_true_test,
         alpha=args.alpha,
         eta=eta,
-        use_gradient=use_gradient
+        use_gradient=use_gradient,
+        verbose=True  # Enable verbose mode for detailed BOA trace
     )
+
+    print(f"\n[ACP_UTILS] AgACI core function returned")
+    print(f"[ACP_UTILS] Results keys: {list(agaci_results.keys())}")
 
     # Add expert information to results
     agaci_results['y_lowers_experts'] = y_lowers_experts

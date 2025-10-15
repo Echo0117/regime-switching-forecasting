@@ -77,10 +77,18 @@ def align_to_switches(
         start_idx = switch_idx - window_before
         end_idx = switch_idx + window_after + 1
 
-        # Check if we have enough data
+        # Check if we have enough data and no NaN values
         if start_idx >= 0 and end_idx <= T:
-            aligned.append(data[start_idx:end_idx])
-            valid.append(True)
+            segment = data[start_idx:end_idx]
+            # Check if segment contains NaN values
+            has_nan = np.any(np.isnan(segment))
+            if not has_nan:
+                aligned.append(segment)
+                valid.append(True)
+            else:
+                # If segment has NaN, mark as invalid
+                aligned.append(segment)
+                valid.append(False)
         else:
             # Pad with NaN if not enough data
             segment = np.full((window_size, data.shape[1]), np.nan)
@@ -96,14 +104,59 @@ def align_to_switches(
     return aligned_data, valid_mask
 
 
+def compute_adaptive_window(
+    d_argmax: np.ndarray,
+    percentile: float = 50.0
+) -> Tuple[int, int]:
+    """
+    Compute adaptive window size based on regime length distribution.
+
+    Parameters
+    ----------
+    d_argmax : np.ndarray
+        Regime indicators
+    percentile : float
+        Percentile of regime lengths to use (default: 50 = median)
+
+    Returns
+    -------
+    window_before : int
+        Number of steps before switch
+    window_after : int
+        Number of steps after switch
+    """
+    switches = detect_regime_switches(d_argmax)
+
+    if len(switches) < 2:
+        # Not enough switches, use defaults
+        return 10, 50
+
+    # Compute regime lengths (distance between consecutive switches)
+    regime_lengths = np.diff(switches)
+
+    # Use percentile of regime lengths
+    typical_length = np.percentile(regime_lengths, percentile)
+
+    # Window sizes: typically want to see about half a regime before/after
+    window_before = max(5, int(typical_length * 0.3))  # 30% before
+    window_after = max(10, int(typical_length * 0.7))   # 70% after
+
+    # Cap maximum to avoid too large windows
+    window_before = min(window_before, 50)
+    window_after = min(window_after, 150)
+
+    return window_before, window_after
+
+
 def plot_agaci_weights_at_switches(
     agaci_weights: np.ndarray,
     d_argmax: np.ndarray,
     gamma_values: List[float],
-    window_before: int = 10,
-    window_after: int = 50,
+    window_before: Optional[int] = None,
+    window_after: Optional[int] = None,
     save_path: Optional[str] = None,
-    show_individual_lines: bool = True
+    show_individual_lines: bool = True,
+    adaptive_window: bool = True
 ):
     """
     Plot AgACI weights aligned to regime switches.
@@ -119,17 +172,45 @@ def plot_agaci_weights_at_switches(
         Regime indicators across FULL dataset (train+valid+test)
     gamma_values : list of float
         Gamma values corresponding to each row
-    window_before : int
-        Time steps before switch
-    window_after : int
-        Time steps after switch
+    window_before : int, optional
+        Time steps before switch. If None and adaptive_window=True, computed automatically.
+    window_after : int, optional
+        Time steps after switch. If None and adaptive_window=True, computed automatically.
     save_path : str, optional
         Path to save figure
     show_individual_lines : bool
         If True, show each switch as a separate line (per tutor's sketch)
+    adaptive_window : bool
+        If True and window sizes not provided, compute adaptive window based on regime lengths
     """
     import os
     switches = detect_regime_switches(d_argmax)
+
+    # Compute adaptive window if not provided
+    if adaptive_window and (window_before is None or window_after is None):
+        computed_before, computed_after = compute_adaptive_window(d_argmax, percentile=50)
+        if window_before is None:
+            window_before = computed_before
+        if window_after is None:
+            window_after = computed_after
+
+        print(f"\n[ADAPTIVE WINDOW] Computed window sizes based on regime lengths:")
+        print(f"[ADAPTIVE WINDOW]   window_before: {window_before}")
+        print(f"[ADAPTIVE WINDOW]   window_after: {window_after}")
+        print(f"[ADAPTIVE WINDOW]   Total window: {window_before + window_after + 1} time steps")
+
+        # Show regime length statistics
+        if len(switches) >= 2:
+            regime_lengths = np.diff(switches)
+            print(f"[ADAPTIVE WINDOW] Regime length statistics:")
+            print(f"[ADAPTIVE WINDOW]   Min: {np.min(regime_lengths)}, Max: {np.max(regime_lengths)}")
+            print(f"[ADAPTIVE WINDOW]   Mean: {np.mean(regime_lengths):.1f}, Median: {np.median(regime_lengths):.1f}")
+    else:
+        # Use defaults if not provided
+        if window_before is None:
+            window_before = 10
+        if window_after is None:
+            window_after = 50
 
     if len(switches) == 0:
         print("No regime switches detected")
@@ -138,21 +219,39 @@ def plot_agaci_weights_at_switches(
     n_gammas = agaci_weights.shape[0]
     n_switches = len(switches)
 
-    print(f"Found {n_switches} regime switches in the dataset")
+    print(f"\n[WEIGHT PLOT DEBUG] Found {n_switches} regime switches in the dataset")
+    print(f"[WEIGHT PLOT DEBUG] Switches at indices: {switches[:20]}..." if n_switches > 20 else f"[WEIGHT PLOT DEBUG] Switches at indices: {switches}")
+    print(f"[WEIGHT PLOT DEBUG] agaci_weights shape: {agaci_weights.shape}")
+    print(f"[WEIGHT PLOT DEBUG] Data length (d_argmax): {len(d_argmax)}")
+
+    # Check how many weights are non-NaN
+    for gamma_idx in range(n_gammas):
+        n_valid_weights = np.sum(~np.isnan(agaci_weights[gamma_idx]))
+        valid_range = np.where(~np.isnan(agaci_weights[gamma_idx]))[0]
+        if len(valid_range) > 0:
+            print(f"[WEIGHT PLOT DEBUG] Gamma {gamma_idx}: {n_valid_weights} valid weights in range [{valid_range[0]}, {valid_range[-1]}]")
+        else:
+            print(f"[WEIGHT PLOT DEBUG] Gamma {gamma_idx}: All NaN")
 
     fig, axes = plt.subplots(1, n_gammas, figsize=(6 * n_gammas, 5), squeeze=False)
     axes = axes.flatten()
 
     time_axis = np.arange(-window_before, window_after + 1)
-    # Use a qualitative palette for better distinction between many switch lines.
-    # Prefer seaborn/tab palettes for up to 20 distinct colors, otherwise fall
-    # back to a continuous colormap.
-    if n_switches <= 10:
-        colors = sns.color_palette('tab10', n_switches)
-    elif n_switches <= 20:
-        colors = sns.color_palette('tab20', n_switches)
-    else:
-        colors = plt.cm.viridis(np.linspace(0, 1, n_switches))
+
+    # Define distinctive colors for switch trajectories
+    # These will be used for valid switches only
+    distinct_colors = [
+        '#e41a1c',  # Red
+        '#377eb8',  # Blue
+        '#4daf4a',  # Green
+        '#984ea3',  # Purple
+        '#ff7f00',  # Orange
+        '#ffff33',  # Yellow
+        '#a65628',  # Brown
+        '#f781bf',  # Pink
+        '#999999',  # Gray
+        '#66c2a5',  # Teal
+    ]
 
     for gamma_idx, (ax, gamma) in enumerate(zip(axes, gamma_values)):
         weights = agaci_weights[gamma_idx]
@@ -161,6 +260,18 @@ def plot_agaci_weights_at_switches(
         aligned, valid = align_to_switches(weights, switches, window_before, window_after)
 
         n_valid = np.sum(valid)
+        print(f"[WEIGHT PLOT DEBUG] Gamma {gamma_idx}: {n_valid}/{len(valid)} valid switches after alignment")
+
+        # Check which switches are valid
+        valid_switches = switches[valid]
+        invalid_switches = switches[~valid]
+        if len(valid_switches) > 0:
+            print(f"[WEIGHT PLOT DEBUG]   Valid switches at: {valid_switches[:10]}..." if len(valid_switches) > 10 else f"[WEIGHT PLOT DEBUG]   Valid switches at: {valid_switches}")
+        if len(invalid_switches) > 0 and len(invalid_switches) <= 10:
+            print(f"[WEIGHT PLOT DEBUG]   Invalid switches at: {invalid_switches}")
+        elif len(invalid_switches) > 10:
+            print(f"[WEIGHT PLOT DEBUG]   {len(invalid_switches)} invalid switches")
+
         if n_valid == 0:
             ax.text(0.5, 0.5, 'No valid switches', ha='center', va='center',
                    transform=ax.transAxes)
@@ -168,10 +279,15 @@ def plot_agaci_weights_at_switches(
 
         # Plot each switch as a separate line (as per tutor's sketch)
         if show_individual_lines:
+            valid_color_idx = 0  # Track color index for valid switches only
             for switch_idx, (traj, is_valid) in enumerate(zip(aligned, valid)):
                 if is_valid:
-                    ax.plot(time_axis, traj, alpha=0.6, color=colors[switch_idx],
-                           linewidth=1.5, label=f'Switch {switch_idx+1}')
+                    # Use color based on valid_color_idx, cycling through distinct_colors
+                    color = distinct_colors[valid_color_idx % len(distinct_colors)]
+                    switch_position = switches[switch_idx]  # Actual position in full data
+                    ax.plot(time_axis, traj, alpha=0.7, color=color,
+                           linewidth=2.0, label=f'Switch at t={switch_position}')
+                    valid_color_idx += 1
 
         # Also show mean
         aligned_valid = aligned[valid]
@@ -188,9 +304,11 @@ def plot_agaci_weights_at_switches(
         ax.set_title(f'γ = {gamma[0]}', fontsize=12, fontweight='bold')
         ax.grid(True, alpha=0.3)
 
-        # Only show legend if few switches
-        if n_valid <= 5:
-            ax.legend(fontsize=8, loc='best')
+        # Show legend if not too many switches
+        if n_valid <= 10:
+            ax.legend(fontsize=9, loc='best', framealpha=0.9)
+        elif n_valid <= 20:
+            ax.legend(fontsize=7, loc='best', ncol=2, framealpha=0.9)
 
     plt.suptitle('AgACI Weight Dynamics Around Regime Switches',
                 fontsize=14, fontweight='bold', y=1.02)
@@ -209,9 +327,10 @@ def plot_coverage_at_switches(
     intervals_dict: dict,
     y_true: np.ndarray,
     d_argmax: np.ndarray,
-    window_before: int = 10,
-    window_after: int = 50,
-    save_path: Optional[str] = None
+    window_before: Optional[int] = None,
+    window_after: Optional[int] = None,
+    save_path: Optional[str] = None,
+    adaptive_window: bool = True
 ):
     """
     Plot coverage around regime switches for different methods.
@@ -225,12 +344,32 @@ def plot_coverage_at_switches(
         Ground truth values
     d_argmax : np.ndarray, shape (T,)
         Regime indicators
-    window_before, window_after : int
-        Window size around switches
+    window_before : int, optional
+        Window size before switches. If None and adaptive_window=True, computed automatically.
+    window_after : int, optional
+        Window size after switches. If None and adaptive_window=True, computed automatically.
     save_path : str, optional
         Path to save figure
+    adaptive_window : bool
+        If True and window sizes not provided, compute adaptive window
     """
     switches = detect_regime_switches(d_argmax)
+
+    # Compute adaptive window if not provided
+    if adaptive_window and (window_before is None or window_after is None):
+        # Create a padded d_argmax for full dataset if needed
+        # For this function, d_argmax is usually from test set only
+        computed_before, computed_after = compute_adaptive_window(d_argmax, percentile=50)
+        if window_before is None:
+            window_before = computed_before
+        if window_after is None:
+            window_after = computed_after
+        print(f"\n[COVERAGE PLOT] Using adaptive window: before={window_before}, after={window_after}")
+    else:
+        if window_before is None:
+            window_before = 10
+        if window_after is None:
+            window_after = 50
 
     if len(switches) == 0:
         print("No regime switches detected")
@@ -336,7 +475,7 @@ def plot_coverage_full_timeline(
     save_path: Optional[str] = None
 ):
     """
-    Plot coverage over the full timeline (entire test set).
+    Plot coverage over the full timeline using bar chart (entire test set).
 
     Parameters
     ----------
@@ -366,8 +505,8 @@ def plot_coverage_full_timeline(
         agaci_colors = {}
     colors = {**base_colors, **agaci_colors}
 
-    # Plot coverage for each method
-    for method_name, (lower, upper) in intervals_dict.items():
+    # Plot coverage for each method using bar chart
+    for method_idx, (method_name, (lower, upper)) in enumerate(intervals_dict.items()):
         # Compute coverage at each time step
         covered = (y_true >= lower) & (y_true <= upper)
 
@@ -375,14 +514,34 @@ def plot_coverage_full_timeline(
         covered_clean = np.where(np.isnan(lower) | np.isnan(upper), np.nan, covered.astype(float))
 
         color = colors.get(method_name, None)
-        ax.plot(covered_clean, label=method_name, linewidth=2, color=color, alpha=0.8)
 
-    # Mark regime switches with vertical lines
+        # Add vertical offset for each method (stacked visualization)
+        y_position = method_idx  # 1.0 spacing between methods
+
+        # Use bar visualization for binary data
+        time_indices = np.arange(len(covered_clean))
+
+        # Create bars for coverage status
+        for t in range(len(covered_clean)):
+            if not np.isnan(covered_clean[t]):
+                if covered_clean[t] == 1:
+                    # Covered: draw filled bar
+                    ax.barh(y_position, 1, left=t, height=0.8, color=color,
+                           alpha=0.7, edgecolor='none')
+                else:
+                    # Not covered: draw empty/outline bar
+                    ax.barh(y_position, 1, left=t, height=0.8, color='white',
+                           alpha=0.9, edgecolor=color, linewidth=0.5)
+
+        # Add method label on the left
+        ax.text(-len(covered_clean)*0.02, y_position, method_name,
+               va='center', ha='right', fontsize=11, fontweight='bold', color=color)
+
+    # Mark regime switches with vertical lines spanning all methods
+    n_methods = len(intervals_dict)
     for switch_idx in switches:
-        ax.axvline(switch_idx, color='red', linestyle='--', linewidth=1, alpha=0.5)
-
-    # Add horizontal line at target coverage (0.9)
-    ax.axhline(0.9, color='gray', linestyle=':', linewidth=1.5, alpha=0.7, label='Target (90%)')
+        ax.axvline(switch_idx, color='red', linestyle='--', linewidth=1.5, alpha=0.4,
+                  ymin=0, ymax=1)
 
     # Set x-axis labels
     if timestamps is not None and len(timestamps) == len(y_true):
@@ -395,11 +554,161 @@ def plot_coverage_full_timeline(
     else:
         ax.set_xlabel('Time step', fontsize=11)
 
-    ax.set_ylabel('Coverage (1 = covered, 0 = not covered)', fontsize=11)
-    ax.set_title('Coverage Over Full Timeline with Regime Switches', fontsize=13, fontweight='bold')
-    ax.legend(loc='upper right', fontsize=10)
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim([-0.05, 1.05])
+    # Adjust y-axis to fit all methods
+    ax.set_ylim([-0.5, n_methods - 0.2])
+    ax.set_ylabel('Method', fontsize=11)
+    ax.set_title('Coverage Over Full Timeline with Regime Switches\n(Filled bar = covered, Empty bar = not covered)',
+                fontsize=13, fontweight='bold')
+
+    # Remove default y-ticks since we have method labels
+    ax.set_yticks([])
+
+    # Add legend for bars
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Patch(facecolor='gray', alpha=0.7, label='Covered (prediction interval contains true value)'),
+        Patch(facecolor='white', edgecolor='gray', linewidth=0.5,
+              label='Not covered (true value outside interval)'),
+        Line2D([0], [0], color='red', linestyle='--', linewidth=1.5,
+              alpha=0.4, label='Regime switch')
+    ]
+    ax.legend(handles=legend_elements, loc='upper right', fontsize=9, framealpha=0.95)
+
+    ax.grid(True, alpha=0.2, axis='x')
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved: {save_path}")
+        plt.close()
+    else:
+        plt.show()
+
+
+def plot_coverage_timeline_scatter(
+    intervals_dict: dict,
+    y_true: np.ndarray,
+    d_argmax: np.ndarray,
+    timestamps: Optional[np.ndarray] = None,
+    save_path: Optional[str] = None
+):
+    """
+    Plot coverage over the full timeline using scatter plot (○/× for each point).
+
+    This is complementary to plot_coverage_full_timeline which uses bars.
+    Scatter plot shows individual time points more clearly.
+
+    Parameters
+    ----------
+    intervals_dict : dict
+        Dictionary with keys as method names ('Naive', 'ACI', 'AgACI', etc.)
+        and values as tuples (lower_bounds, upper_bounds), each shape (T,)
+    y_true : np.ndarray, shape (T,)
+        Ground truth values
+    d_argmax : np.ndarray, shape (T,)
+        Regime indicators
+    timestamps : np.ndarray, optional
+        Timestamps for x-axis. If None, uses indices
+    save_path : str, optional
+        Path to save figure
+    """
+    switches = detect_regime_switches(d_argmax)
+
+    fig, ax = plt.subplots(figsize=(16, 6))
+
+    # Define colors
+    base_colors = {'DS3M': 'C4', 'Naive': 'C0', 'ACI': 'C2', 'AgACI': 'C3'}
+    agaci_methods = {k: v for k, v in intervals_dict.items() if 'AgACI' in k and k != 'AgACI'}
+    if agaci_methods:
+        agaci_cmap = plt.cm.viridis(np.linspace(0.2, 0.9, len(agaci_methods)))
+        agaci_colors = {name: agaci_cmap[i] for i, name in enumerate(agaci_methods.keys())}
+    else:
+        agaci_colors = {}
+    colors = {**base_colors, **agaci_colors}
+
+    # Plot coverage for each method using scatter plot
+    for method_idx, (method_name, (lower, upper)) in enumerate(intervals_dict.items()):
+        # Compute coverage at each time step
+        covered = (y_true >= lower) & (y_true <= upper)
+
+        # Handle NaN values
+        covered_clean = np.where(np.isnan(lower) | np.isnan(upper), np.nan, covered.astype(float))
+
+        color = colors.get(method_name, None)
+
+        # Add vertical offset for each method (stacked visualization)
+        y_position = method_idx  # 1.0 spacing between methods
+
+        # Use scatter plot for binary data
+        time_indices = np.arange(len(covered_clean))
+
+        # Separate covered and not covered points
+        covered_mask = covered_clean == 1
+        not_covered_mask = covered_clean == 0
+
+        # Plot covered points (filled circles)
+        if np.any(covered_mask):
+            covered_times = time_indices[covered_mask]
+            ax.scatter(covered_times, np.full(len(covered_times), y_position),
+                      marker='o', s=30, color=color, alpha=0.8, edgecolors='none',
+                      zorder=3)
+
+        # Plot not covered points (X markers)
+        if np.any(not_covered_mask):
+            not_covered_times = time_indices[not_covered_mask]
+            ax.scatter(not_covered_times, np.full(len(not_covered_times), y_position),
+                      marker='x', s=50, color=color, alpha=0.9, linewidths=2,
+                      zorder=3)
+
+        # Add horizontal reference line for this method
+        ax.axhline(y_position, color='gray', linestyle='-', linewidth=0.3, alpha=0.2, zorder=0)
+
+        # Add method label on the left
+        ax.text(-len(covered_clean)*0.02, y_position, method_name,
+               va='center', ha='right', fontsize=11, fontweight='bold', color=color)
+
+    # Mark regime switches with vertical lines spanning all methods
+    n_methods = len(intervals_dict)
+    for switch_idx in switches:
+        ax.axvline(switch_idx, color='red', linestyle='--', linewidth=1.5, alpha=0.4,
+                  ymin=0, ymax=1, zorder=1)
+
+    # Set x-axis labels
+    if timestamps is not None and len(timestamps) == len(y_true):
+        tick_interval = max(1, len(y_true) // 12)
+        xticks = np.arange(0, len(y_true), tick_interval)
+        xticklabels = [str(timestamps[i]) for i in xticks]
+        ax.set_xticks(xticks)
+        ax.set_xticklabels(xticklabels, rotation=45, fontsize=9, ha='right')
+        ax.set_xlabel('Time', fontsize=11)
+    else:
+        ax.set_xlabel('Time step', fontsize=11)
+
+    # Adjust y-axis to fit all methods
+    ax.set_ylim([-0.5, n_methods - 0.2])
+    ax.set_ylabel('Method', fontsize=11)
+    ax.set_title('Coverage Over Full Timeline (Scatter Plot)\n(○ = covered, × = not covered)',
+                fontsize=13, fontweight='bold')
+
+    # Remove default y-ticks since we have method labels
+    ax.set_yticks([])
+
+    # Add legend for scatter markers
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+              markersize=8, linestyle='', label='Covered (true value in interval)'),
+        Line2D([0], [0], marker='x', color='w', markerfacecolor='gray',
+              markeredgecolor='gray', markersize=10, markeredgewidth=2,
+              linestyle='', label='Not covered (true value outside interval)'),
+        Line2D([0], [0], color='red', linestyle='--', linewidth=1.5,
+              alpha=0.4, label='Regime switch')
+    ]
+    ax.legend(handles=legend_elements, loc='upper right', fontsize=9, framealpha=0.95)
+
+    ax.grid(True, alpha=0.2, axis='x')
     plt.tight_layout()
 
     if save_path:
