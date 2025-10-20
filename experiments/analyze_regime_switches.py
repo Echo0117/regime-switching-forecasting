@@ -164,21 +164,21 @@ def run_analysis(args):
     print(f"\nPlots saved to {save_dir}/")
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--problem", default="Electricity",
-                    choices=["Toy", "Lorenz", "Sleep", "Unemployment", "Hangzhou", "Seattle", "Pacific", "Electricity"])
-    ap.add_argument("--aci_train_size", type=int, default=20)
-    ap.add_argument("--alpha", type=float, default=0.1)
-    ap.add_argument("--tab-gamma", type=float, nargs="*", default=[0.005, 0.01, 0.02, 0.05])
-    ap.add_argument("--seed", type=int, default=42)
+# def main():
+#     ap = argparse.ArgumentParser()
+#     ap.add_argument("--problem", default="Electricity",
+#                     choices=["Toy", "Lorenz", "Sleep", "Unemployment", "Hangzhou", "Seattle", "Pacific", "Electricity"])
+#     ap.add_argument("--aci_train_size", type=int, default=20)
+#     ap.add_argument("--alpha", type=float, default=0.1)
+#     ap.add_argument("--tab-gamma", type=float, nargs="*", default=[0.005, 0.01, 0.02, 0.05])
+#     ap.add_argument("--seed", type=int, default=42)
 
-    args = ap.parse_args()
+#     args = ap.parse_args()
 
-    np.random.seed(args.seed)
+#     np.random.seed(args.seed)
 
-    run_analysis(args)
+#     run_analysis(args)
 
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()

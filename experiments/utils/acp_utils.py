@@ -109,7 +109,7 @@ def agaci_intervals(
         y_true_test = y_full[T0:T0 + test_len]
 
     # Run AgACI aggregation
-    eta = float(getattr(args, 'agaci_eta', 0.1))
+    eta = float(getattr(args, 'agaci_eta', 2))
     use_gradient = bool(getattr(args, 'agaci_gradient', True))
 
     print(f"\n[ACP_UTILS] Preparing to call AgACI core function")

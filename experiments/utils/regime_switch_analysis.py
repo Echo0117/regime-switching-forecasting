@@ -40,10 +40,14 @@ def align_to_switches(
     data: np.ndarray,
     switch_indices: np.ndarray,
     window_before: int = 10,
-    window_after: int = 50
-) -> Tuple[np.ndarray, np.ndarray]:
+    window_after: int = 50,
+    cut_at_next_switch: bool = True
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Align time series data to regime switch points.
+
+    When cut_at_next_switch=True, cut the window if another
+    switch occurs within window_after. Use min(window_after, time_to_next_switch - 1).
 
     Parameters
     ----------
@@ -55,27 +59,43 @@ def align_to_switches(
         Number of time steps before switch to include
     window_after : int
         Number of time steps after switch to include
+    cut_at_next_switch : bool
+        If True, cut window when next switch occurs
 
     Returns
     -------
-    aligned_data : np.ndarray, shape (n_switches, window_before + window_after + 1, ...)
-        Data aligned to switches (trial 0 = switch point)
+    aligned_data : list of np.ndarray
+        Data aligned to switches. Each element may have different length if cut_at_next_switch=True
     valid_mask : np.ndarray, shape (n_switches,)
         Boolean mask indicating which switches had enough data
+    actual_lengths : np.ndarray, shape (n_switches,)
+        Actual length of each aligned segment after cutting
     """
     if data.ndim == 1:
         data = data.reshape(-1, 1)
 
     T = len(data)
-    window_size = window_before + window_after + 1
     n_switches = len(switch_indices)
 
     aligned = []
     valid = []
+    actual_lengths = []
 
-    for switch_idx in switch_indices:
+    for i, switch_idx in enumerate(switch_indices):
         start_idx = switch_idx - window_before
-        end_idx = switch_idx + window_after + 1
+
+        # Determine end index based on next switch
+        if cut_at_next_switch and i < n_switches - 1:
+            # Time until next switch
+            next_switch = switch_indices[i + 1]
+            time_to_next = next_switch - switch_idx
+            # Use min(window_after, time_to_next_switch - 1)
+            effective_window_after = min(window_after, time_to_next - 1)
+        else:
+            effective_window_after = window_after
+
+        end_idx = switch_idx + effective_window_after + 1
+        actual_length = window_before + effective_window_after + 1
 
         # Check if we have enough data and no NaN values
         if start_idx >= 0 and end_idx <= T:
@@ -83,25 +103,28 @@ def align_to_switches(
             # Check if segment contains NaN values
             has_nan = np.any(np.isnan(segment))
             if not has_nan:
-                aligned.append(segment)
+                aligned.append(segment if data.shape[1] > 1 else segment.squeeze(-1))
                 valid.append(True)
+                actual_lengths.append(actual_length)
             else:
                 # If segment has NaN, mark as invalid
-                aligned.append(segment)
+                aligned.append(segment if data.shape[1] > 1 else segment.squeeze(-1))
                 valid.append(False)
+                actual_lengths.append(actual_length)
         else:
-            # Pad with NaN if not enough data
-            segment = np.full((window_size, data.shape[1]), np.nan)
+            # Not enough data before or after
             valid.append(False)
-            aligned.append(segment)
+            # Still create a segment but mark as invalid
+            safe_start = max(0, start_idx)
+            safe_end = min(T, end_idx)
+            segment = data[safe_start:safe_end]
+            aligned.append(segment if data.shape[1] > 1 else segment.squeeze(-1))
+            actual_lengths.append(len(segment))
 
-    aligned_data = np.array(aligned)  # shape: (n_switches, window_size, D)
     valid_mask = np.array(valid)
+    actual_lengths = np.array(actual_lengths)
 
-    if data.shape[1] == 1:
-        aligned_data = aligned_data.squeeze(-1)
-
-    return aligned_data, valid_mask
+    return aligned, valid_mask, actual_lengths
 
 
 def compute_adaptive_window(
@@ -156,12 +179,14 @@ def plot_agaci_weights_at_switches(
     window_after: Optional[int] = None,
     save_path: Optional[str] = None,
     show_individual_lines: bool = True,
-    adaptive_window: bool = True
+    adaptive_window: bool = True,
+    standardize_ylim: bool = True,
+    cut_at_next_switch: bool = True
 ):
     """
     Plot AgACI weights aligned to regime switches.
 
-    Following tutor's sketch: Each subplot shows one gamma, with each regime switch
+    Each subplot shows one gamma, with each regime switch
     as a separate line overlaid on the same plot.
 
     Parameters
@@ -179,7 +204,7 @@ def plot_agaci_weights_at_switches(
     save_path : str, optional
         Path to save figure
     show_individual_lines : bool
-        If True, show each switch as a separate line (per tutor's sketch)
+        If True, show each switch as a separate line
     adaptive_window : bool
         If True and window sizes not provided, compute adaptive window based on regime lengths
     """
@@ -253,11 +278,32 @@ def plot_agaci_weights_at_switches(
         '#66c2a5',  # Teal
     ]
 
+    # First pass: collect all valid aligned trajectories to compute global y-limits
+    all_valid_weights = []
+    if standardize_ylim:
+        for gamma_idx in range(n_gammas):
+            weights = agaci_weights[gamma_idx]
+            aligned, valid, _ = align_to_switches(weights, switches, window_before, window_after, cut_at_next_switch)
+            for traj, is_valid in zip(aligned, valid):
+                if is_valid:
+                    all_valid_weights.extend(traj.flatten())
+
+        if len(all_valid_weights) > 0:
+            global_ymin = np.nanmin(all_valid_weights)
+            global_ymax = np.nanmax(all_valid_weights)
+            # Add 10% padding
+            y_range = global_ymax - global_ymin
+            global_ylim = (global_ymin - 0.1 * y_range, global_ymax + 0.1 * y_range)
+        else:
+            global_ylim = None
+    else:
+        global_ylim = None
+
     for gamma_idx, (ax, gamma) in enumerate(zip(axes, gamma_values)):
         weights = agaci_weights[gamma_idx]
 
-        # Align to switches
-        aligned, valid = align_to_switches(weights, switches, window_before, window_after)
+        # Align to switches with cutting enabled
+        aligned, valid, actual_lengths = align_to_switches(weights, switches, window_before, window_after, cut_at_next_switch)
 
         n_valid = np.sum(valid)
         print(f"[WEIGHT PLOT DEBUG] Gamma {gamma_idx}: {n_valid}/{len(valid)} valid switches after alignment")
@@ -277,23 +323,40 @@ def plot_agaci_weights_at_switches(
                    transform=ax.transAxes)
             continue
 
-        # Plot each switch as a separate line (as per tutor's sketch)
+        # Plot each switch as a separate line
         if show_individual_lines:
             valid_color_idx = 0  # Track color index for valid switches only
-            for switch_idx, (traj, is_valid) in enumerate(zip(aligned, valid)):
+            for switch_idx, (traj, is_valid, actual_len) in enumerate(zip(aligned, valid, actual_lengths)):
                 if is_valid:
                     # Use color based on valid_color_idx, cycling through distinct_colors
                     color = distinct_colors[valid_color_idx % len(distinct_colors)]
                     switch_position = switches[switch_idx]  # Actual position in full data
-                    ax.plot(time_axis, traj, alpha=0.7, color=color,
+                    # Create time axis for this specific trajectory
+                    traj_time_axis = np.arange(-window_before, -window_before + actual_len)
+                    ax.plot(traj_time_axis, traj, alpha=0.7, color=color,
                            linewidth=2.0, label=f'Switch at t={switch_position}')
                     valid_color_idx += 1
 
-        # Also show mean
-        aligned_valid = aligned[valid]
-        mean_weight = np.nanmean(aligned_valid, axis=0)
-        ax.plot(time_axis, mean_weight, 'k-', linewidth=2.5,
-               label=f'Mean ({n_valid} switches)', zorder=10)
+        # Compute mean with variable-length trajectories
+        # We need to pad to common length for averaging
+        max_len = window_before + window_after + 1
+        padded_trajs = []
+        for traj, is_valid in zip(aligned, valid):
+            if is_valid:
+                padded = np.full(max_len, np.nan)
+                padded[:len(traj)] = traj
+                padded_trajs.append(padded)
+
+        if len(padded_trajs) > 0:
+            padded_trajs = np.array(padded_trajs)
+            mean_weight = np.nanmean(padded_trajs, axis=0)
+            # Count how many trajectories contribute to each time point
+            n_contributors = np.sum(~np.isnan(padded_trajs), axis=0)
+            # Only plot where we have at least one contributor
+            time_axis = np.arange(-window_before, window_after + 1)
+            valid_time_mask = n_contributors > 0
+            ax.plot(time_axis[valid_time_mask], mean_weight[valid_time_mask], 'k-', linewidth=2.5,
+                   label=f'Mean ({n_valid} switches)', zorder=10)
 
         # Mark switch point
         ax.axvline(0, color='r', linestyle='--', linewidth=2, alpha=0.7,
@@ -303,6 +366,10 @@ def plot_agaci_weights_at_switches(
         ax.set_ylabel('Weight', fontsize=11)
         ax.set_title(f'γ = {gamma[0]}', fontsize=12, fontweight='bold')
         ax.grid(True, alpha=0.3)
+
+        # Apply standardized y-limits if requested
+        if standardize_ylim and global_ylim is not None:
+            ax.set_ylim(global_ylim)
 
         # Show legend if not too many switches
         if n_valid <= 10:
@@ -330,7 +397,9 @@ def plot_coverage_at_switches(
     window_before: Optional[int] = None,
     window_after: Optional[int] = None,
     save_path: Optional[str] = None,
-    adaptive_window: bool = True
+    adaptive_window: bool = True,
+    show_error_bars: bool = True,
+    cut_at_next_switch: bool = True
 ):
     """
     Plot coverage around regime switches for different methods.
@@ -411,21 +480,38 @@ def plot_coverage_at_switches(
 
         covered = (y_true >= lower) & (y_true <= upper)
 
-        # Align coverage to switches
-        aligned_coverage, valid = align_to_switches(covered.astype(float), switches,
-                                                     window_before, window_after)
+        # Align coverage to switches with cutting
+        aligned_coverage, valid, actual_lengths = align_to_switches(covered.astype(float), switches,
+                                                     window_before, window_after, cut_at_next_switch)
         n_valid_switches = np.sum(valid)
-        aligned_coverage = aligned_coverage[valid]
 
         print(f"  {method_name}: {n_valid_switches}/{len(valid)} valid switches for alignment")
 
-        if len(aligned_coverage) == 0:
+        if n_valid_switches == 0:
             print(f"Warning: No valid switches for method {method_name}, skipping")
             continue
 
+        # Pad aligned coverage to common length for averaging
+        max_len = window_before + window_after + 1
+        padded_coverage = []
+        for traj, is_valid in zip(aligned_coverage, valid):
+            if is_valid:
+                padded = np.full(max_len, np.nan)
+                padded[:len(traj)] = traj
+                padded_coverage.append(padded)
+
+        padded_coverage = np.array(padded_coverage)
+
         # Compute mean coverage across switches
-        mean_coverage = np.nanmean(aligned_coverage, axis=0)
-        std_coverage = np.nanstd(aligned_coverage, axis=0)
+        mean_coverage = np.nanmean(padded_coverage, axis=0)
+        std_coverage = np.nanstd(padded_coverage, axis=0)
+        # Standard error for error bars
+        n_contributors = np.sum(~np.isnan(padded_coverage), axis=0)
+        stderr_coverage = std_coverage / np.sqrt(np.maximum(n_contributors, 1))
+
+        time_axis = np.arange(-window_before, window_after + 1)
+        # Only plot where we have contributors
+        valid_time_mask = n_contributors > 0
 
         color = colors.get(method_name, None)
 
@@ -441,12 +527,16 @@ def plot_coverage_at_switches(
             linestyle = '-'
             linewidth = 2
 
-        plt.plot(time_axis, mean_coverage, label=method_name, linewidth=linewidth,
+        plt.plot(time_axis[valid_time_mask], mean_coverage[valid_time_mask],
+                label=method_name, linewidth=linewidth,
                 color=color, linestyle=linestyle)
-        # plt.fill_between(time_axis,
-        #                 mean_coverage - std_coverage,
-        #                 mean_coverage + std_coverage,
-        #                 alpha=0.15, color=color)
+
+        # Add error bars (standard error)
+        if show_error_bars:
+            plt.fill_between(time_axis[valid_time_mask],
+                            mean_coverage[valid_time_mask] - stderr_coverage[valid_time_mask],
+                            mean_coverage[valid_time_mask] + stderr_coverage[valid_time_mask],
+                            alpha=0.2, color=color)
 
     # Mark switch point
     plt.axvline(0, color='r', linestyle='--', linewidth=2, label='Regime switch')
@@ -455,7 +545,7 @@ def plot_coverage_at_switches(
     plt.ylabel('Coverage rate')
     plt.title('Coverage dynamics around regime switches')
     plt.legend()
-    plt.grid(True, alpha=0.3)
+    plt.grid(True, alpha=0.3)       
     plt.ylim([0, 1.05])
 
     if save_path:
@@ -869,6 +959,106 @@ def plot_regime_heatmap_full(
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"   Saved: {save_path}")
+        plt.close()
+    else:
+        plt.show()
+
+
+def plot_individual_switch_trajectories(
+    intervals_dict: dict,
+    y_true: np.ndarray,
+    d_argmax: np.ndarray,
+    window_before: int = 10,
+    window_after: int = 50,
+    save_path: Optional[str] = None,
+    cut_at_next_switch: bool = True
+):
+    """
+    Plot individual switch trajectory timelines (before averaging).
+
+    Show each switch's coverage timeline separately.
+
+    Parameters
+    ----------
+    intervals_dict : dict
+        Dictionary with method names and (lower, upper) bounds
+    y_true : np.ndarray
+        Ground truth values
+    d_argmax : np.ndarray
+        Regime indicators
+    window_before, window_after : int
+        Window sizes
+    save_path : str, optional
+        Path to save figure
+    cut_at_next_switch : bool
+        Whether to cut windows at next switch
+    """
+    switches = detect_regime_switches(d_argmax)
+
+    if len(switches) == 0:
+        print("No regime switches detected")
+        return
+
+    # Choose one method to display (e.g., AgACI)
+    method_name = 'AgACI' if 'AgACI' in intervals_dict else list(intervals_dict.keys())[0]
+    lower, upper = intervals_dict[method_name]
+
+    covered = (y_true >= lower) & (y_true <= upper)
+    aligned_coverage, valid, actual_lengths = align_to_switches(
+        covered.astype(float), switches, window_before, window_after, cut_at_next_switch
+    )
+
+    # Plot each valid switch
+    valid_switches = switches[valid]
+    n_valid = len(valid_switches)
+
+    if n_valid == 0:
+        print("No valid switches to plot")
+        return
+
+    # Create subplots
+    n_cols = min(5, n_valid)
+    n_rows = (n_valid + n_cols - 1) // n_cols
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3 * n_rows), squeeze=False)
+    axes = axes.flatten()
+
+    plot_idx = 0
+    for i, (switch_idx, traj, is_valid, actual_len) in enumerate(zip(switches, aligned_coverage, valid, actual_lengths)):
+        if not is_valid:
+            continue
+
+        ax = axes[plot_idx]
+        time_axis = np.arange(-window_before, -window_before + actual_len)
+
+        # Plot coverage (1 = covered, 0 = not covered)
+        ax.plot(time_axis, traj, 'o-', markersize=4, linewidth=1.5)
+        ax.axvline(0, color='r', linestyle='--', linewidth=1.5, alpha=0.7, label='Switch')
+        ax.axhline(0.9, color='gray', linestyle=':', linewidth=1, alpha=0.5, label='Target')
+
+        ax.set_xlabel('Time relative to switch', fontsize=9)
+        ax.set_ylabel('Coverage', fontsize=9)
+        ax.set_title(f'Switch at t={switch_idx}', fontsize=10)
+        ax.set_ylim([-0.1, 1.1])
+        ax.grid(True, alpha=0.3)
+
+        if plot_idx == 0:
+            ax.legend(fontsize=8)
+
+        plot_idx += 1
+
+    # Hide unused subplots
+    for idx in range(plot_idx, len(axes)):
+        axes[idx].axis('off')
+
+    plt.suptitle(f'Individual Switch Trajectories: {method_name}\n(Each subplot shows coverage around one regime switch)',
+                fontsize=12, fontweight='bold')
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved: {save_path}")
         plt.close()
     else:
         plt.show()

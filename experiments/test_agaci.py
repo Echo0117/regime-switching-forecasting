@@ -31,6 +31,7 @@ from experiments.utils.regime_switch_analysis import (
     plot_coverage_timeline_scatter,
     plot_coverage_vs_length_tradeoff,
     plot_regime_heatmap_full,
+    plot_individual_switch_trajectories,
     load_timestamps_for_dataset
 )
 
@@ -42,7 +43,7 @@ def main():
     ap.add_argument("--aci_train_size", type=int, default=20)
     ap.add_argument("--alpha", type=float, default=0.1)
     ap.add_argument("--tab-gamma", type=float, nargs="*", default=[0.0025, 0.005, 0.01, 0.02, 0.05])
-    ap.add_argument("--agaci-eta", type=float, default=0.1, help="Learning rate for AgACI BOA")
+    ap.add_argument("--agaci-eta", type=float, default=0.5, help="Learning rate for AgACI BOA (increased from 0.1 to 0.5 for faster adaptation)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--d-dim", type=int, default=2, help="Number of regimes (default=2 for simpler experiments)")
 
@@ -147,7 +148,12 @@ def main():
 
     print(f"ACI completed. Got {len(gammas_aci)} experts with gammas: {gammas_aci}")
 
-    # Select best gamma for ACI (simple: use first one for now)
+    # Store individual ACI results for each gamma (for plotting comparison)
+    aci_results_by_gamma = {}
+    for i, gamma in enumerate(gammas_aci):
+        aci_results_by_gamma[gamma[0]] = (y_lowers_aci[i], y_uppers_aci[i])
+
+    # Select first gamma for main "ACI" comparison (or could use a specific one)
     aci_lower = y_lowers_aci[0]
     aci_upper = y_uppers_aci[0]
 
@@ -267,13 +273,25 @@ def main():
     print("2. Plotting coverage dynamics at regime switches...")
     print("="*60)
 
+    # Align individual ACI results to full test period
+    aci_by_gamma_full = {}
+    for gamma_val, (lower, upper) in aci_results_by_gamma.items():
+        lower_full = np.full(test_len, np.nan)
+        upper_full = np.full(test_len, np.nan)
+        lower_full[T0:T0+test_size_eff] = lower
+        upper_full[T0:T0+test_size_eff] = upper
+        aci_by_gamma_full[gamma_val] = (lower_full, upper_full)
+
     # Compute naive interval (same as DS3M for comparison but labeled differently)
     # Naive = using DS3M quantiles directly without adaptation
     intervals_dict = {
         'Naive': (y_lq_ds3m, y_uq_ds3m),  # DS3M original interval (naive/unadapted)
-        'ACI': (aci_lower_full, aci_upper_full),
         'AgACI': (agaci_lower_full, agaci_upper_full),
     }
+
+    # Add individual ACI results for each gamma
+    for gamma_val, (lower_full, upper_full) in aci_by_gamma_full.items():
+        intervals_dict[f'ACI (γ={gamma_val:.4f})'] = (lower_full, upper_full)
 
     print(f"\n>>> CREATING intervals_dict with {len(intervals_dict)} methods: {list(intervals_dict.keys())}")
 
@@ -283,10 +301,6 @@ def main():
         n_valid = np.sum(~np.isnan(lower))
         print(f"  {method_name}: {n_valid}/{len(lower)} valid values, "
               f"range=[{np.nanmin(lower):.2f}, {np.nanmax(upper):.2f}]")
-        if method_name == 'ACI' and np.allclose(lower[~np.isnan(lower)],
-                                                  agaci_lower_full[~np.isnan(agaci_lower_full)],
-                                                  rtol=1e-5):
-            print(f"  WARNING: ACI and AgACI intervals are identical!")
 
     # Plot 2a: Windowed coverage around switches
     plot_coverage_at_switches(
@@ -315,6 +329,20 @@ def main():
         d_argmax_test,  # Use test regime for coverage analysis
         timestamps=timestamps_test,  # Use same timestamps as test heatmap
         save_path=f"{save_dir}/coverage_timeline_scatter.png"
+    )
+
+    # Plot 2d: Individual switch trajectories
+    print("\n2d. Plotting individual switch trajectories...")
+    # Compute window sizes for this plot
+    from experiments.utils.regime_switch_analysis import compute_adaptive_window
+    wb, wa = compute_adaptive_window(d_argmax_test, percentile=50)
+    plot_individual_switch_trajectories(
+        intervals_dict,
+        y_true,
+        d_argmax_test,
+        window_before=wb,
+        window_after=wa,
+        save_path=f"{save_dir}/individual_switch_trajectories.png"
     )
 
     # Plot 3: Tradeoff plot
