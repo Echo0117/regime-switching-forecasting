@@ -1064,6 +1064,148 @@ def plot_individual_switch_trajectories(
         plt.show()
 
 
+def plot_d_argmax_verification(
+    d_argmax: np.ndarray,
+    y_data: np.ndarray,
+    d_dim: int,
+    dataname: str,
+    timestamps: Optional[np.ndarray] = None,
+    save_path: Optional[str] = None,
+    plot_scope: str = "test"
+):
+    """
+    Plot d_argmax sequence alongside actual data to verify regime detection.
+
+    This creates a two-panel plot:
+    - Top panel: Actual data with regime switches marked
+    - Bottom panel: d_argmax sequence as a heatmap
+
+    Parameters
+    ----------
+    d_argmax : np.ndarray, shape (T,)
+        Regime indicators
+    y_data : np.ndarray, shape (T,) or (T, D)
+        Actual data values
+    d_dim : int
+        Number of regimes
+    dataname : str
+        Dataset name for title
+    timestamps : np.ndarray, optional
+        Timestamps for x-axis
+    save_path : str, optional
+        Path to save figure
+    plot_scope : str
+        'test' or 'full' for labeling
+    """
+    switches = detect_regime_switches(d_argmax)
+
+    # Handle multi-dimensional data
+    if y_data.ndim > 1:
+        # Plot first dimension only for simplicity
+        y_plot = y_data[:, 0]
+        dim_label = "Dimension 0"
+    else:
+        y_plot = y_data
+        dim_label = ""
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 8),
+                                     gridspec_kw={'height_ratios': [3, 1]})
+
+    # Top panel: Actual data
+    time_indices = np.arange(len(y_plot))
+
+    # Color code data by regime
+    unique_regimes = np.unique(d_argmax)
+    colors_regime = plt.cm.tab10(np.linspace(0, 1, d_dim))
+
+    # Plot data points colored by regime
+    for regime in unique_regimes:
+        mask = d_argmax == regime
+        ax1.scatter(time_indices[mask], y_plot[mask],
+                   c=[colors_regime[int(regime)]],
+                   label=f'Regime {int(regime)}',
+                   alpha=0.6, s=20, zorder=2)
+
+    # Draw vertical lines at regime switches
+    for switch_idx in switches:
+        ax1.axvline(switch_idx, color='red', linestyle='--',
+                   linewidth=1.5, alpha=0.5, zorder=1)
+
+    ax1.set_ylabel('Data Value', fontsize=11)
+    ax1.set_title(f'{dataname}: Data with Regime Switches {dim_label}\n'
+                 f'({len(switches)} switches detected)',
+                 fontsize=12, fontweight='bold')
+    ax1.legend(loc='best', fontsize=9, ncol=min(d_dim, 5))
+    ax1.grid(True, alpha=0.3)
+
+    # Bottom panel: d_argmax heatmap
+    regime_map = d_argmax.reshape(1, -1)
+    im = ax2.imshow(regime_map, aspect='auto', cmap='tab10',
+                    interpolation='nearest', vmin=0, vmax=d_dim-1)
+
+    # Mark regime switches
+    for switch_idx in switches:
+        ax2.axvline(switch_idx, color='red', linestyle='--',
+                   linewidth=1.5, alpha=0.7)
+
+    # Set x-axis labels
+    n_points = len(d_argmax)
+    if timestamps is not None and len(timestamps) == n_points:
+        tick_interval = max(1, n_points // 12)
+        xticks = np.arange(0, n_points, tick_interval)
+        xticklabels = [str(timestamps[i]) for i in xticks]
+        ax2.set_xticks(xticks)
+        ax2.set_xticklabels(xticklabels, rotation=45, fontsize=9, ha='right')
+        ax2.set_xlabel('Time', fontsize=11)
+    else:
+        ax2.set_xlabel('Time step', fontsize=11)
+
+    ax2.set_ylabel('Regime', fontsize=11)
+    ax2.set_title(f'd_argmax Sequence (d_dim={d_dim})',
+                 fontsize=11, fontweight='bold')
+    ax2.set_yticks([])
+
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax2, label='Regime ID',
+                       orientation='vertical', ticks=range(d_dim))
+
+    # Add statistics text
+    regime_changes = np.diff(d_argmax) != 0
+    n_changes = np.sum(regime_changes)
+
+    # Calculate regime durations
+    regime_lengths = []
+    if len(switches) > 0:
+        # Add first regime length (from start to first switch)
+        regime_lengths.append(switches[0])
+        # Add lengths between consecutive switches
+        for i in range(len(switches) - 1):
+            regime_lengths.append(switches[i+1] - switches[i])
+        # Add last regime length (from last switch to end)
+        regime_lengths.append(len(d_argmax) - switches[-1])
+    else:
+        regime_lengths = [len(d_argmax)]
+
+    stats_text = f"Regime Statistics:\n"
+    stats_text += f"  Switches: {n_changes}\n"
+    stats_text += f"  Avg regime length: {np.mean(regime_lengths):.1f}\n"
+    stats_text += f"  Min/Max length: {np.min(regime_lengths)}/{np.max(regime_lengths)}"
+
+    ax1.text(0.02, 0.98, stats_text, transform=ax1.transAxes,
+            fontsize=9, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved: {save_path}")
+        plt.close()
+    else:
+        plt.show()
+
+
 def load_timestamps_for_dataset(dataname: str, data_length: int, from_end: bool = False) -> Optional[np.ndarray]:
     """
     Load timestamps for a given dataset if available.
@@ -1106,13 +1248,13 @@ def load_timestamps_for_dataset(dataname: str, data_length: int, from_end: bool 
             else:
                 print(f"Warning: Dataset has {len(timestamps)} timestamps but need {data_length}")
                 return None
-                
+
         # Add more datasets as needed
         # elif dataname == "Hangzhou":
         #     ...
-        
+
     except Exception as e:
         print(f"Warning: Could not load timestamps for {dataname}: {e}")
         return None
-    
+
     return None

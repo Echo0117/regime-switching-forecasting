@@ -111,6 +111,7 @@ def agaci_intervals(
     # Run AgACI aggregation
     eta = float(getattr(args, 'agaci_eta', 2))
     use_gradient = bool(getattr(args, 'agaci_gradient', True))
+    lr_schedule = str(getattr(args, 'agaci_lr_schedule', 'constant'))  # Default to 'constant' for regime-switching
 
     print(f"\n[ACP_UTILS] Preparing to call AgACI core function")
     print(f"[ACP_UTILS] Expert intervals shapes:")
@@ -121,6 +122,7 @@ def agaci_intervals(
     print(f"[ACP_UTILS]   - alpha: {args.alpha}")
     print(f"[ACP_UTILS]   - eta (learning rate): {eta}")
     print(f"[ACP_UTILS]   - use_gradient: {use_gradient}")
+    print(f"[ACP_UTILS]   - lr_schedule: {lr_schedule}")
     print(f"[ACP_UTILS] Expert lower bound ranges:")
     for i, gamma in enumerate(gammas):
         print(f"[ACP_UTILS]   - Expert {i} (gamma={gamma[0]:.4f}): "
@@ -133,6 +135,7 @@ def agaci_intervals(
         alpha=args.alpha,
         eta=eta,
         use_gradient=use_gradient,
+        lr_schedule=lr_schedule,
         verbose=True  # Enable verbose mode for detailed BOA trace
     )
 

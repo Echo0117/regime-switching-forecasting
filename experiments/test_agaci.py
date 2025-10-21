@@ -32,6 +32,7 @@ from experiments.utils.regime_switch_analysis import (
     plot_coverage_vs_length_tradeoff,
     plot_regime_heatmap_full,
     plot_individual_switch_trajectories,
+    plot_d_argmax_verification,
     load_timestamps_for_dataset
 )
 
@@ -44,6 +45,9 @@ def main():
     ap.add_argument("--alpha", type=float, default=0.1)
     ap.add_argument("--tab-gamma", type=float, nargs="*", default=[0.0025, 0.005, 0.01, 0.02, 0.05])
     ap.add_argument("--agaci-eta", type=float, default=0.5, help="Learning rate for AgACI BOA (increased from 0.1 to 0.5 for faster adaptation)")
+    ap.add_argument("--agaci-lr-schedule", type=str, default="constant",
+                    choices=["constant", "sqrt", "log", "poly025", "poly06"],
+                    help="Learning rate schedule for AgACI BOA (default: constant, best for regime-switching)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--d-dim", type=int, default=2, help="Number of regimes (default=2 for simpler experiments)")
 
@@ -214,13 +218,21 @@ def main():
     agaci_upper_full[T0:T0+test_size_eff] = agaci_upper
 
     # ---------------------------------------------------
-    # 4. Generate plots
+    # 4. Generate plots with dynamic folder names
     # ---------------------------------------------------
-    save_dir = f"figures/agaci_test/{args.problem}"
+    # Create descriptive folder suffix with key parameters
+    gamma_min = min(args.tab_gamma)
+    gamma_max = max(args.tab_gamma)
+    param_suffix = f"eta{args.agaci_eta:.2f}_lr{args.agaci_lr_schedule}_gamma{gamma_min:.4f}-{gamma_max:.4f}_alpha{args.alpha:.2f}_ddim{args.d_dim}"
+
+    # Put parameter info in folder name instead of file name
+    save_dir = f"figures/agaci_test/{args.problem}_{param_suffix}"
     os.makedirs(save_dir, exist_ok=True)
 
     print("\n" + "="*60)
     print("Generating plots...")
+    print(f"Parameter configuration: {param_suffix}")
+    print(f"Save directory: {save_dir}")
     print("="*60)
 
     # Plot 0a: Regime heatmap for full dataset (train+valid+test with window indices)
@@ -245,6 +257,18 @@ def main():
         dataname=args.problem,
         timestamps=timestamps_test,
         save_path=f"{save_dir}/regime_heatmap_test.png",
+        plot_scope="test"
+    )
+
+    # Plot 0c: d_argmax verification (data + regime switches)
+    print("\n0c. Plotting d_argmax verification (test set)...")
+    plot_d_argmax_verification(
+        d_argmax=d_argmax_test,
+        y_data=y_true,
+        d_dim=args.d_dim,
+        dataname=args.problem,
+        timestamps=timestamps_test,
+        save_path=f"{save_dir}/d_argmax_verification_test.png",
         plot_scope="test"
     )
 
@@ -371,6 +395,7 @@ def main():
 
     print(f"\n{'='*60}")
     print(f"All plots saved to: {save_dir}/")
+    print(f"Configuration: {param_suffix}")
     print(f"{'='*60}\n")
 
 
