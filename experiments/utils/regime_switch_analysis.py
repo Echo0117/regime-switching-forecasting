@@ -1507,6 +1507,177 @@ def compute_recovery_metrics(
     return metrics
 
 
+def plot_length_at_switches(
+    intervals_dict: dict,
+    y_true: np.ndarray,
+    d_argmax: np.ndarray,
+    window_before: Optional[int] = None,
+    window_after: Optional[int] = None,
+    save_path: Optional[str] = None,
+    adaptive_window: bool = True,
+    show_error_bars: bool = True,
+    cut_at_next_switch: bool = True
+):
+    """
+    Plot median interval length around regime switches for different methods.
+
+    Similar to plot_coverage_at_switches but shows interval length instead of coverage.
+    This helps understand how different gamma values adjust interval width in response
+    to regime switches.
+
+    Parameters
+    ----------
+    intervals_dict : dict
+        Dictionary with keys as method names and values as (lower_bounds, upper_bounds)
+    y_true : np.ndarray, shape (T,)
+        Ground truth values (not used but kept for API consistency)
+    d_argmax : np.ndarray, shape (T,)
+        Regime indicators
+    window_before : int, optional
+        Window size before switches
+    window_after : int, optional
+        Window size after switches
+    save_path : str, optional
+        Path to save figure
+    adaptive_window : bool
+        If True, compute adaptive window sizes
+    show_error_bars : bool
+        If True, show standard error bars
+    cut_at_next_switch : bool
+        If True, truncate trajectories at next switch
+    """
+    switches = detect_regime_switches(d_argmax)
+
+    # Compute adaptive window if not provided
+    if adaptive_window and (window_before is None or window_after is None):
+        computed_before, computed_after = compute_adaptive_window(d_argmax, percentile=50)
+        if window_before is None:
+            window_before = computed_before
+        if window_after is None:
+            window_after = computed_after
+        print(f"\n[LENGTH PLOT] Using adaptive window: before={window_before}, after={window_after}")
+    else:
+        if window_before is None:
+            window_before = 10
+        if window_after is None:
+            window_after = 50
+
+    if len(switches) == 0:
+        print("No regime switches detected")
+        return
+
+    print(f"\n[LENGTH PLOT] Found {len(switches)} regime switches")
+    print(f"Data length: {len(d_argmax)}, Window: [{window_before}, {window_after}]")
+
+    plt.figure(figsize=(10, 6))
+    time_axis = np.arange(-window_before, window_after + 1)
+
+    # Define colors
+    base_colors = {'DS3M': 'C4', 'Naive': 'C0', 'ACI': 'C2', 'AgACI': 'C3'}
+
+    # Separate ACI methods by gamma
+    aci_gamma_methods = {k: v for k, v in intervals_dict.items() if 'ACI (γ=' in k}
+
+    # Assign colors to ACI gamma methods
+    if aci_gamma_methods:
+        n_gamma = len(aci_gamma_methods)
+        gamma_cmap = plt.cm.viridis(np.linspace(0.2, 0.9, n_gamma))
+        gamma_colors = {name: gamma_cmap[i] for i, name in enumerate(aci_gamma_methods.keys())}
+    else:
+        gamma_colors = {}
+
+    colors = {**base_colors, **gamma_colors}
+
+    print(f"Plotting interval length for methods: {list(intervals_dict.keys())}")
+
+    for method_name, (lower, upper) in intervals_dict.items():
+        print(f"Processing method: {method_name}")
+
+        # Compute interval lengths
+        lengths = upper - lower
+
+        # Check for NaN
+        n_nan = np.sum(np.isnan(lengths))
+        if n_nan > 0:
+            print(f"Warning: {method_name} has {n_nan} NaN values")
+
+        # Align lengths to switches with cutting
+        aligned_lengths, valid, actual_lengths = align_to_switches(
+            lengths, switches, window_before, window_after, cut_at_next_switch
+        )
+        n_valid_switches = np.sum(valid)
+
+        print(f"  {method_name}: {n_valid_switches}/{len(valid)} valid switches")
+
+        if n_valid_switches == 0:
+            print(f"Warning: No valid switches for {method_name}, skipping")
+            continue
+
+        # Pad aligned lengths to common length
+        max_len = window_before + window_after + 1
+        padded_lengths = []
+        for traj, is_valid in zip(aligned_lengths, valid):
+            if is_valid:
+                padded = np.full(max_len, np.nan)
+                padded[:len(traj)] = traj
+                padded_lengths.append(padded)
+
+        padded_lengths = np.array(padded_lengths)
+
+        # Compute mean and std
+        mean_length = np.nanmean(padded_lengths, axis=0)
+        std_length = np.nanstd(padded_lengths, axis=0)
+        n_contributors = np.sum(~np.isnan(padded_lengths), axis=0)
+        stderr_length = std_length / np.sqrt(np.maximum(n_contributors, 1))
+
+        time_axis = np.arange(-window_before, window_after + 1)
+        valid_time_mask = n_contributors > 0
+
+        color = colors.get(method_name, None)
+
+        # Line styles
+        linestyle = '-'
+        if 'Naive' in method_name:
+            linestyle = ':'
+            linewidth = 3
+        elif 'ACI' in method_name and 'AgACI' not in method_name:
+            linestyle = '--'
+            linewidth = 2.5
+        else:
+            linestyle = '-'
+            linewidth = 2
+
+        plt.plot(time_axis[valid_time_mask], mean_length[valid_time_mask],
+                label=method_name, linewidth=linewidth,
+                color=color, linestyle=linestyle)
+
+        # Add error bars
+        if show_error_bars:
+            plt.fill_between(time_axis[valid_time_mask],
+                           mean_length[valid_time_mask] - stderr_length[valid_time_mask],
+                           mean_length[valid_time_mask] + stderr_length[valid_time_mask],
+                           alpha=0.2, color=color)
+
+    # Mark switch point
+    plt.axvline(0, color='r', linestyle='--', linewidth=2, label='Regime switch')
+
+    plt.xlabel('Time relative to switch', fontsize=11)
+    plt.ylabel('Interval length', fontsize=11)
+    plt.title('Interval Length Dynamics Around Regime Switches\n'
+             'Shows how different gamma values adjust interval width',
+             fontsize=12, fontweight='bold')
+    plt.legend(loc='best', fontsize=9, ncol=2)
+    plt.grid(True, alpha=0.3)
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved: {save_path}")
+        plt.close()
+    else:
+        plt.show()
+
+
 def plot_recovery_comparison(
     recovery_metrics: dict,
     save_path: Optional[str] = None

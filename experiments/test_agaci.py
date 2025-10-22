@@ -34,6 +34,7 @@ from experiments.utils.regime_switch_analysis import (
     plot_individual_switch_trajectories,
     plot_d_argmax_verification,
     plot_coverage_raw_timeline,
+    plot_length_at_switches,
     compute_recovery_metrics,
     plot_recovery_comparison,
     load_timestamps_for_dataset
@@ -330,12 +331,23 @@ def main():
               f"range=[{np.nanmin(lower):.2f}, {np.nanmax(upper):.2f}]")
 
     # Plot 2a: Windowed coverage around switches
+    print("\n2a. Plotting windowed coverage at regime switches...")
     plot_coverage_at_switches(
         intervals_dict,
         y_true,
         d_argmax_test,  # Use test regime for coverage analysis
         adaptive_window=True,  # Use adaptive window sizing
         save_path=f"{save_dir}/coverage_at_switches.png"
+    )
+
+    # Plot 2a2: Windowed interval length around switches
+    print("\n2a2. Plotting interval length at regime switches...")
+    plot_length_at_switches(
+        intervals_dict,
+        y_true,
+        d_argmax_test,
+        adaptive_window=True,
+        save_path=f"{save_dir}/length_at_switches.png"
     )
 
     # Plot 2b: Full timeline coverage (bar chart)
