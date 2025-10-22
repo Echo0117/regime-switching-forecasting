@@ -30,8 +30,8 @@ TRAIN_SIZE="${TRAIN_SIZE:-1000}"
 MODELS=("ds3m")
 
 # Interval methods to run
-METHODS=("ACI")
-# METHODS=("Naive" "ACI" "AGACI")
+# METHODS=("ACI")
+METHODS=("Naive" "ACI" "AGACI")
 
 # Datasets to loop
 PROBLEMS=(
@@ -40,10 +40,9 @@ PROBLEMS=(
   "Unemployment"
   # "Lorenz"
   # "Hangzhou"
+  # "Electricity"
   # "Seattle"
   # "Pacific"
-  
-  # "Electricity"
 )
 
 # --------------------------

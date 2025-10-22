@@ -210,7 +210,7 @@ def main():
     print("\n" + "="*60)
     print(f"All plots saved to: {save_dir}/")
     print("="*60)
-    print("\nVisualization matches tutor's sketch:")
+    print("\nVisualization")
     print("  ✓ d_dim=2 (2 regimes)")
     print("  ✓ Each subplot = one gamma value")
     print("  ✓ Each colored line = one regime switch")

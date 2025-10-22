@@ -364,7 +364,7 @@ def plot_agaci_weights_at_switches(
 
         ax.set_xlabel('Time relative to switch (t)', fontsize=11)
         ax.set_ylabel('Weight', fontsize=11)
-        ax.set_title(f'γ = {gamma[0]}', fontsize=12, fontweight='bold')
+        ax.set_title(f'γ = {gamma}', fontsize=12, fontweight='bold')
         ax.grid(True, alpha=0.3)
 
         # Apply standardized y-limits if requested
