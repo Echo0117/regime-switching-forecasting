@@ -1266,13 +1266,15 @@ def plot_coverage_raw_timeline(
     d_argmax: np.ndarray,
     timestamps: Optional[np.ndarray] = None,
     save_path: Optional[str] = None,
-    highlight_switches: bool = True
+    highlight_switches: bool = True,
+    use_heatmap: bool = True
 ):
     """
-    Plot raw coverage over time (no averaging) to see immediate response to regime switches.
+    Plot raw coverage over time with improved visualization.
 
-    This shows the instantaneous coverage at each time step, making it easier to see
-    how different gamma values respond differently to regime switches.
+    Offers two modes:
+    1. Heatmap mode (use_heatmap=True): Shows coverage as stacked heatmap rows
+    2. Rolling average mode (use_heatmap=False): Shows smoothed coverage curves
 
     Parameters
     ----------
@@ -1288,10 +1290,11 @@ def plot_coverage_raw_timeline(
         Path to save figure
     highlight_switches : bool
         If True, mark regime switches with vertical lines
+    use_heatmap : bool
+        If True, use heatmap visualization (better for many switches)
+        If False, use rolling average curves
     """
     switches = detect_regime_switches(d_argmax)
-
-    fig, ax = plt.subplots(figsize=(16, 6))
 
     # Define colors
     base_colors = {'DS3M': 'C4', 'Naive': 'C0', 'ACI': 'C2', 'AgACI': 'C3'}
@@ -1306,7 +1309,7 @@ def plot_coverage_raw_timeline(
         else:
             other_methods[method_name] = bounds
 
-    # Assign colors to ACI gamma methods
+    # Assign colors
     if aci_gamma_methods:
         n_gamma = len(aci_gamma_methods)
         gamma_cmap = plt.cm.viridis(np.linspace(0.2, 0.9, n_gamma))
@@ -1316,60 +1319,150 @@ def plot_coverage_raw_timeline(
 
     colors = {**base_colors, **gamma_colors}
 
-    time_indices = np.arange(len(y_true))
+    if use_heatmap:
+        # ========== Heatmap Mode: Better for visualizing many switches ==========
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 8),
+                                        gridspec_kw={'height_ratios': [1, 4]})
 
-    # Plot each method
-    for method_name, (lower, upper) in intervals_dict.items():
-        # Compute binary coverage
-        covered = (y_true >= lower) & (y_true <= upper)
-        covered = covered.astype(float)
+        # Top panel: Regime indicator
+        regime_map = d_argmax.reshape(1, -1)
+        im_regime = ax1.imshow(regime_map, aspect='auto', cmap='tab10',
+                              interpolation='nearest', vmin=0, vmax=max(d_argmax))
 
-        # Handle NaN
-        valid_mask = ~np.isnan(lower) & ~np.isnan(upper)
-        covered[~valid_mask] = np.nan
+        if highlight_switches:
+            for switch_idx in switches:
+                ax1.axvline(switch_idx, color='red', linestyle='-',
+                           linewidth=1, alpha=0.5)
 
-        color = colors.get(method_name, None)
+        ax1.set_ylabel('Regime', fontsize=10)
+        ax1.set_yticks([])
+        ax1.set_xticklabels([])
+        ax1.set_title(f'Regime Sequence ({len(switches)} switches)', fontsize=10)
 
-        # Line styles
-        if 'Naive' in method_name:
-            linestyle = ':'
-            linewidth = 2
-            alpha = 0.6
-        elif 'ACI (γ=' in method_name:
-            linestyle = '-'
-            linewidth = 1.5
-            alpha = 0.7
-        elif 'AgACI' in method_name:
-            linestyle = '-'
-            linewidth = 2.5
-            alpha = 0.9
-        else:
-            linestyle = '-'
-            linewidth = 2
-            alpha = 0.7
+        # Bottom panel: Coverage heatmap
+        # Prepare coverage data
+        method_names = []
+        coverage_matrix = []
 
-        ax.plot(time_indices, covered, label=method_name,
-                color=color, linestyle=linestyle, linewidth=linewidth, alpha=alpha)
+        # Add other methods first
+        for method_name, (lower, upper) in other_methods.items():
+            covered = (y_true >= lower) & (y_true <= upper)
+            valid_mask = ~np.isnan(lower) & ~np.isnan(upper)
+            covered = covered.astype(float)
+            covered[~valid_mask] = np.nan
+            coverage_matrix.append(covered)
+            method_names.append(method_name)
 
-    # Mark regime switches
-    if highlight_switches:
-        for switch_idx in switches:
-            ax.axvline(switch_idx, color='red', linestyle='--',
-                      linewidth=1, alpha=0.3, zorder=0)
+        # Add ACI gamma methods (sorted by gamma)
+        sorted_aci = sorted(aci_gamma_methods.items(),
+                           key=lambda x: float(x[0].split('γ=')[1].rstrip(')')))
+        for method_name, (lower, upper) in sorted_aci:
+            covered = (y_true >= lower) & (y_true <= upper)
+            valid_mask = ~np.isnan(lower) & ~np.isnan(upper)
+            covered = covered.astype(float)
+            covered[~valid_mask] = np.nan
+            coverage_matrix.append(covered)
+            # Extract gamma for label
+            gamma_str = method_name.split('γ=')[1].rstrip(')')
+            method_names.append(f'γ={gamma_str}')
 
-    ax.set_xlabel('Time step', fontsize=11)
-    ax.set_ylabel('Coverage (1=covered, 0=not covered)', fontsize=11)
-    ax.set_title('Raw Coverage Timeline (No Averaging)\n'
-                 f'Showing immediate response to regime switches ({len(switches)} switches)',
-                 fontsize=12, fontweight='bold')
-    ax.set_ylim([-0.05, 1.05])
-    ax.legend(loc='best', fontsize=9, ncol=2)
-    ax.grid(True, alpha=0.3, axis='y')
+        coverage_matrix = np.array(coverage_matrix)
 
-    # Add text annotation
-    ax.text(0.02, 0.02, f'Red dashed lines = regime switches (n={len(switches)})',
-            transform=ax.transAxes, fontsize=9,
-            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        # Create heatmap
+        im_cov = ax2.imshow(coverage_matrix, aspect='auto', cmap='RdYlGn',
+                            interpolation='nearest', vmin=0, vmax=1)
+
+        # Mark switches
+        if highlight_switches:
+            for switch_idx in switches:
+                ax2.axvline(switch_idx, color='red', linestyle='-',
+                           linewidth=1, alpha=0.3)
+
+        ax2.set_ylabel('Method', fontsize=11)
+        ax2.set_xlabel('Time step', fontsize=11)
+        ax2.set_yticks(range(len(method_names)))
+        ax2.set_yticklabels(method_names, fontsize=9)
+
+        # Add colorbar
+        cbar = plt.colorbar(im_cov, ax=ax2, label='Coverage (Green=1, Red=0)')
+
+        # Add statistics
+        avg_coverage = np.nanmean(coverage_matrix, axis=1)
+        for i, (name, avg) in enumerate(zip(method_names, avg_coverage)):
+            ax2.text(len(y_true) + 2, i, f'{avg:.2f}',
+                    va='center', fontsize=8, fontweight='bold')
+
+        ax2.text(len(y_true) + 2, -1, 'Avg', fontweight='bold', fontsize=8)
+
+        plt.suptitle('Coverage Timeline (Heatmap View)\n'
+                    'Green=Covered, Red=Missed, White=NaN',
+                    fontsize=12, fontweight='bold')
+
+    else:
+        # ========== Rolling Average Mode: Smoother visualization ==========
+        fig, ax = plt.subplots(figsize=(16, 6))
+
+        window_size = 10  # Rolling window for smoothing
+        time_indices = np.arange(len(y_true))
+
+        # Plot each method with rolling average
+        for method_name, (lower, upper) in intervals_dict.items():
+            covered = (y_true >= lower) & (y_true <= upper)
+            covered = covered.astype(float)
+
+            valid_mask = ~np.isnan(lower) & ~np.isnan(upper)
+            covered[~valid_mask] = np.nan
+
+            # Compute rolling average
+            covered_smooth = np.full_like(covered, np.nan)
+            for i in range(len(covered)):
+                start = max(0, i - window_size // 2)
+                end = min(len(covered), i + window_size // 2 + 1)
+                window_data = covered[start:end]
+                if not np.all(np.isnan(window_data)):
+                    covered_smooth[i] = np.nanmean(window_data)
+
+            color = colors.get(method_name, None)
+
+            # Line styles
+            if 'Naive' in method_name:
+                linestyle = ':'
+                linewidth = 2.5
+                alpha = 0.8
+            elif 'ACI (γ=' in method_name:
+                linestyle = '-'
+                linewidth = 2
+                alpha = 0.8
+            elif 'AgACI' in method_name:
+                linestyle = '-'
+                linewidth = 3
+                alpha = 0.9
+            else:
+                linestyle = '-'
+                linewidth = 2
+                alpha = 0.8
+
+            ax.plot(time_indices, covered_smooth, label=method_name,
+                   color=color, linestyle=linestyle, linewidth=linewidth, alpha=alpha)
+
+        # Mark regime switches
+        if highlight_switches:
+            for switch_idx in switches:
+                ax.axvline(switch_idx, color='red', linestyle='--',
+                          linewidth=1.5, alpha=0.4, zorder=0)
+
+        ax.set_xlabel('Time step', fontsize=11)
+        ax.set_ylabel(f'Coverage (rolling avg, window={window_size})', fontsize=11)
+        ax.set_title(f'Smoothed Coverage Timeline\n'
+                    f'Rolling average over {window_size} steps ({len(switches)} regime switches)',
+                    fontsize=12, fontweight='bold')
+        ax.set_ylim([-0.05, 1.05])
+        ax.legend(loc='best', fontsize=9, ncol=2)
+        ax.grid(True, alpha=0.3)
+
+        # Add target line
+        ax.axhline(0.9, color='green', linestyle=':', linewidth=1,
+                  alpha=0.5, label='Target: 90%')
 
     plt.tight_layout()
 
@@ -1683,7 +1776,13 @@ def plot_recovery_comparison(
     save_path: Optional[str] = None
 ):
     """
-    Visualize recovery time comparison across methods.
+    Visualize recovery time comparison across methods with enhanced details.
+
+    Creates a 4-panel visualization showing:
+    - Recovery time vs gamma (with error bars)
+    - Recovery rate comparison
+    - Box plot of recovery time distributions
+    - Summary table
 
     Parameters
     ----------
@@ -1692,7 +1791,8 @@ def plot_recovery_comparison(
     save_path : str, optional
         Path to save figure
     """
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    fig = plt.figure(figsize=(16, 10))
+    gs = fig.add_gridspec(3, 2, height_ratios=[2, 2, 1], hspace=0.3, wspace=0.3)
 
     # Separate ACI gamma methods from others
     aci_gamma_methods = {}
@@ -1700,40 +1800,55 @@ def plot_recovery_comparison(
 
     for method_name, metrics in recovery_metrics.items():
         if 'ACI (γ=' in method_name:
-            # Extract gamma value
             gamma_str = method_name.split('γ=')[1].rstrip(')')
             aci_gamma_methods[float(gamma_str)] = (method_name, metrics)
         else:
             other_methods[method_name] = metrics
 
-    # Plot 1: Recovery time vs gamma (for ACI methods)
+    # ========== Panel 1: Recovery time vs gamma with error bars ==========
+    ax1 = fig.add_subplot(gs[0, 0])
     if aci_gamma_methods:
         gamma_values = sorted(aci_gamma_methods.keys())
         mean_times = []
         median_times = []
+        std_times = []
 
         for gamma in gamma_values:
             _, metrics = aci_gamma_methods[gamma]
             mean_times.append(metrics['mean_recovery_time'])
             median_times.append(metrics['median_recovery_time'])
+            if len(metrics['recovery_times']) > 0:
+                std_times.append(np.std(metrics['recovery_times']))
+            else:
+                std_times.append(0)
 
-        ax1.plot(gamma_values, mean_times, 'o-', linewidth=2, markersize=8,
-                label='Mean recovery time', color='C0')
+        mean_times = np.array(mean_times)
+        std_times = np.array(std_times)
+
+        ax1.errorbar(gamma_values, mean_times, yerr=std_times,
+                    fmt='o-', linewidth=2, markersize=8, capsize=5,
+                    label='Mean ± Std', color='C0')
         ax1.plot(gamma_values, median_times, 's--', linewidth=2, markersize=8,
-                label='Median recovery time', color='C1')
+                label='Median', color='C1', alpha=0.7)
 
         ax1.set_xlabel('Gamma value (learning rate)', fontsize=11)
         ax1.set_ylabel('Recovery time (steps)', fontsize=11)
         ax1.set_title('Recovery Time vs Gamma\n(Lower is better - faster adaptation)',
                      fontsize=12, fontweight='bold')
-        ax1.legend()
+        ax1.legend(loc='best')
         ax1.grid(True, alpha=0.3)
         ax1.set_xscale('log')
+
+        # Add value labels
+        for i, (g, m) in enumerate(zip(gamma_values, mean_times)):
+            ax1.text(g, m, f'{m:.1f}', ha='left', va='bottom', fontsize=8)
     else:
         ax1.text(0.5, 0.5, 'No ACI gamma methods found',
                 ha='center', va='center', transform=ax1.transAxes)
 
-    # Plot 2: Recovery rate comparison (all methods)
+    # ========== Panel 2: Recovery rate bar chart ==========
+    ax2 = fig.add_subplot(gs[0, 1])
+
     method_names = []
     recovery_rates = []
     colors = []
@@ -1758,19 +1873,109 @@ def plot_recovery_comparison(
             colors.append(gamma_cmap[i])
 
     x_pos = np.arange(len(method_names))
-    ax2.bar(x_pos, recovery_rates, color=colors, alpha=0.7, edgecolor='black')
+    bars = ax2.bar(x_pos, recovery_rates, color=colors, alpha=0.7, edgecolor='black')
+
+    # Add value labels on bars
+    for i, (bar, rate) in enumerate(zip(bars, recovery_rates)):
+        height = bar.get_height()
+        ax2.text(bar.get_x() + bar.get_width()/2., height,
+                f'{rate:.1f}%', ha='center', va='bottom', fontsize=8)
+
     ax2.set_xlabel('Method', fontsize=11)
-    ax2.set_ylabel('Recovery rate (%)', fontsize=11)
+    ax2.set_ylabel('Recovery success rate (%)', fontsize=11)
     ax2.set_title('Coverage Recovery Success Rate\n(Higher is better)',
                  fontsize=12, fontweight='bold')
     ax2.set_xticks(x_pos)
     ax2.set_xticklabels(method_names, rotation=45, ha='right', fontsize=9)
     ax2.set_ylim([0, 105])
-    ax2.axhline(100, color='green', linestyle='--', linewidth=1, alpha=0.5, label='100%')
+    ax2.axhline(100, color='green', linestyle='--', linewidth=1, alpha=0.5, label='Target: 100%')
     ax2.grid(True, alpha=0.3, axis='y')
     ax2.legend()
 
-    plt.tight_layout()
+    # ========== Panel 3: Box plot of recovery time distributions ==========
+    ax3 = fig.add_subplot(gs[1, :])
+
+    if aci_gamma_methods:
+        recovery_time_data = []
+        box_labels = []
+        box_colors = []
+
+        # Collect data
+        gamma_cmap = plt.cm.viridis(np.linspace(0.2, 0.9, len(aci_gamma_methods)))
+        for i, (gamma, (method_name, metrics)) in enumerate(sorted(aci_gamma_methods.items())):
+            if len(metrics['recovery_times']) > 0:
+                recovery_time_data.append(metrics['recovery_times'])
+                box_labels.append(f'γ={gamma:.4f}')
+                box_colors.append(gamma_cmap[i])
+
+        # Create box plot
+        bp = ax3.boxplot(recovery_time_data, labels=box_labels, patch_artist=True,
+                        showmeans=True, meanline=True,
+                        boxprops=dict(alpha=0.7),
+                        medianprops=dict(color='red', linewidth=2),
+                        meanprops=dict(color='blue', linestyle='--', linewidth=2))
+
+        # Color boxes
+        for patch, color in zip(bp['boxes'], box_colors):
+            patch.set_facecolor(color)
+
+        ax3.set_xlabel('Method (Gamma value)', fontsize=11)
+        ax3.set_ylabel('Recovery time (steps)', fontsize=11)
+        ax3.set_title('Distribution of Recovery Times\n(Red line = median, Blue dashed = mean)',
+                     fontsize=12, fontweight='bold')
+        ax3.grid(True, alpha=0.3, axis='y')
+        ax3.set_xticks(range(1, len(box_labels) + 1))
+        ax3.set_xticklabels(box_labels, rotation=45, ha='right')
+
+    # ========== Panel 4: Summary table ==========
+    ax4 = fig.add_subplot(gs[2, :])
+    ax4.axis('off')
+
+    # Prepare table data
+    if aci_gamma_methods:
+        table_data = []
+        headers = ['Gamma', 'Mean (steps)', 'Median (steps)', 'Std (steps)',
+                  'Success Rate', 'Total Switches', 'Failed']
+
+        for gamma, (method_name, metrics) in sorted(aci_gamma_methods.items()):
+            if len(metrics['recovery_times']) > 0:
+                mean_t = np.mean(metrics['recovery_times'])
+                median_t = np.median(metrics['recovery_times'])
+                std_t = np.std(metrics['recovery_times'])
+            else:
+                mean_t = median_t = std_t = 0
+
+            row = [
+                f'{gamma:.4f}',
+                f'{mean_t:.1f}',
+                f'{median_t:.1f}',
+                f'{std_t:.1f}',
+                f'{metrics["recovery_rate"]*100:.1f}%',
+                f'{metrics["n_switches"]}',
+                f'{metrics["failed_recoveries"]}'
+            ]
+            table_data.append(row)
+
+        table = ax4.table(cellText=table_data, colLabels=headers,
+                         cellLoc='center', loc='center',
+                         bbox=[0, 0, 1, 1])
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1, 2)
+
+        # Color header
+        for i in range(len(headers)):
+            table[(0, i)].set_facecolor('#40466e')
+            table[(0, i)].set_text_props(weight='bold', color='white')
+
+        # Color rows alternately
+        for i in range(1, len(table_data) + 1):
+            for j in range(len(headers)):
+                if i % 2 == 0:
+                    table[(i, j)].set_facecolor('#f0f0f0')
+
+    plt.suptitle('Comprehensive Recovery Time Analysis',
+                fontsize=14, fontweight='bold', y=0.995)
 
     if save_path:
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
