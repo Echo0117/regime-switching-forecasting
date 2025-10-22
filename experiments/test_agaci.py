@@ -33,6 +33,9 @@ from experiments.utils.regime_switch_analysis import (
     plot_regime_heatmap_full,
     plot_individual_switch_trajectories,
     plot_d_argmax_verification,
+    plot_coverage_raw_timeline,
+    compute_recovery_metrics,
+    plot_recovery_comparison,
     load_timestamps_for_dataset
 )
 
@@ -369,8 +372,35 @@ def main():
         save_path=f"{save_dir}/individual_switch_trajectories.png"
     )
 
+    # Plot 2e: Raw timeline coverage (no averaging)
+    print("\n2e. Plotting raw coverage timeline (no averaging)...")
+    plot_coverage_raw_timeline(
+        intervals_dict,
+        y_true,
+        d_argmax_test,
+        timestamps=timestamps_test,
+        save_path=f"{save_dir}/coverage_raw_timeline.png",
+        highlight_switches=True
+    )
+
+    # Plot 2f: Recovery metrics
+    print("\n2f. Computing and plotting coverage recovery metrics...")
+    recovery_metrics = compute_recovery_metrics(
+        intervals_dict,
+        y_true,
+        d_argmax_test,
+        target_coverage=1.0 - args.alpha,  # 0.9 for alpha=0.1
+        recovery_threshold=0.85,  # 85% of target
+        window_size=10
+    )
+
+    plot_recovery_comparison(
+        recovery_metrics,
+        save_path=f"{save_dir}/recovery_comparison.png"
+    )
+
     # Plot 3: Tradeoff plot
-    print("3. Plotting coverage vs length tradeoff...")
+    print("\n3. Plotting coverage vs length tradeoff...")
     results_dict = {}
 
     for method_name, (lower, upper) in intervals_dict.items():

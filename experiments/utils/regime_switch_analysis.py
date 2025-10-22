@@ -1258,3 +1258,353 @@ def load_timestamps_for_dataset(dataname: str, data_length: int, from_end: bool 
         return None
 
     return None
+
+
+def plot_coverage_raw_timeline(
+    intervals_dict: dict,
+    y_true: np.ndarray,
+    d_argmax: np.ndarray,
+    timestamps: Optional[np.ndarray] = None,
+    save_path: Optional[str] = None,
+    highlight_switches: bool = True
+):
+    """
+    Plot raw coverage over time (no averaging) to see immediate response to regime switches.
+
+    This shows the instantaneous coverage at each time step, making it easier to see
+    how different gamma values respond differently to regime switches.
+
+    Parameters
+    ----------
+    intervals_dict : dict
+        Dictionary with method names and (lower, upper) bounds
+    y_true : np.ndarray
+        Ground truth values
+    d_argmax : np.ndarray
+        Regime indicators
+    timestamps : np.ndarray, optional
+        Time labels for x-axis
+    save_path : str, optional
+        Path to save figure
+    highlight_switches : bool
+        If True, mark regime switches with vertical lines
+    """
+    switches = detect_regime_switches(d_argmax)
+
+    fig, ax = plt.subplots(figsize=(16, 6))
+
+    # Define colors
+    base_colors = {'DS3M': 'C4', 'Naive': 'C0', 'ACI': 'C2', 'AgACI': 'C3'}
+
+    # Separate ACI methods by gamma
+    aci_gamma_methods = {}
+    other_methods = {}
+
+    for method_name, bounds in intervals_dict.items():
+        if 'ACI (γ=' in method_name:
+            aci_gamma_methods[method_name] = bounds
+        else:
+            other_methods[method_name] = bounds
+
+    # Assign colors to ACI gamma methods
+    if aci_gamma_methods:
+        n_gamma = len(aci_gamma_methods)
+        gamma_cmap = plt.cm.viridis(np.linspace(0.2, 0.9, n_gamma))
+        gamma_colors = {name: gamma_cmap[i] for i, name in enumerate(aci_gamma_methods.keys())}
+    else:
+        gamma_colors = {}
+
+    colors = {**base_colors, **gamma_colors}
+
+    time_indices = np.arange(len(y_true))
+
+    # Plot each method
+    for method_name, (lower, upper) in intervals_dict.items():
+        # Compute binary coverage
+        covered = (y_true >= lower) & (y_true <= upper)
+        covered = covered.astype(float)
+
+        # Handle NaN
+        valid_mask = ~np.isnan(lower) & ~np.isnan(upper)
+        covered[~valid_mask] = np.nan
+
+        color = colors.get(method_name, None)
+
+        # Line styles
+        if 'Naive' in method_name:
+            linestyle = ':'
+            linewidth = 2
+            alpha = 0.6
+        elif 'ACI (γ=' in method_name:
+            linestyle = '-'
+            linewidth = 1.5
+            alpha = 0.7
+        elif 'AgACI' in method_name:
+            linestyle = '-'
+            linewidth = 2.5
+            alpha = 0.9
+        else:
+            linestyle = '-'
+            linewidth = 2
+            alpha = 0.7
+
+        ax.plot(time_indices, covered, label=method_name,
+                color=color, linestyle=linestyle, linewidth=linewidth, alpha=alpha)
+
+    # Mark regime switches
+    if highlight_switches:
+        for switch_idx in switches:
+            ax.axvline(switch_idx, color='red', linestyle='--',
+                      linewidth=1, alpha=0.3, zorder=0)
+
+    ax.set_xlabel('Time step', fontsize=11)
+    ax.set_ylabel('Coverage (1=covered, 0=not covered)', fontsize=11)
+    ax.set_title('Raw Coverage Timeline (No Averaging)\n'
+                 f'Showing immediate response to regime switches ({len(switches)} switches)',
+                 fontsize=12, fontweight='bold')
+    ax.set_ylim([-0.05, 1.05])
+    ax.legend(loc='best', fontsize=9, ncol=2)
+    ax.grid(True, alpha=0.3, axis='y')
+
+    # Add text annotation
+    ax.text(0.02, 0.02, f'Red dashed lines = regime switches (n={len(switches)})',
+            transform=ax.transAxes, fontsize=9,
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved: {save_path}")
+        plt.close()
+    else:
+        plt.show()
+
+
+def compute_recovery_metrics(
+    intervals_dict: dict,
+    y_true: np.ndarray,
+    d_argmax: np.ndarray,
+    target_coverage: float = 0.9,
+    recovery_threshold: float = 0.85,
+    window_size: int = 10
+):
+    """
+    Compute recovery time metrics for each method after regime switches.
+
+    For each switch, measure how long it takes for coverage to recover above
+    a threshold value (e.g., 85% of target coverage).
+
+    Parameters
+    ----------
+    intervals_dict : dict
+        Dictionary with method names and (lower, upper) bounds
+    y_true : np.ndarray
+        Ground truth values
+    d_argmax : np.ndarray
+        Regime indicators
+    target_coverage : float
+        Target coverage rate (default 0.9 for 90%)
+    recovery_threshold : float
+        Threshold for considering coverage "recovered" (default 0.85 = 85% of target)
+    window_size : int
+        Window size for computing rolling coverage (default 10)
+
+    Returns
+    -------
+    metrics : dict
+        Dictionary with method names and recovery statistics:
+        - 'mean_recovery_time': Average time to recover
+        - 'median_recovery_time': Median time to recover
+        - 'recovery_times': List of recovery times for each switch
+        - 'failed_recoveries': Number of switches that didn't recover within window
+    """
+    switches = detect_regime_switches(d_argmax)
+
+    if len(switches) == 0:
+        print("No regime switches detected")
+        return {}
+
+    threshold = target_coverage * recovery_threshold
+    metrics = {}
+
+    print(f"\n{'='*80}")
+    print(f"COVERAGE RECOVERY ANALYSIS")
+    print(f"{'='*80}")
+    print(f"Target coverage: {target_coverage:.1%}")
+    print(f"Recovery threshold: {threshold:.1%} ({recovery_threshold:.0%} of target)")
+    print(f"Window size: {window_size}")
+    print(f"Number of switches: {len(switches)}")
+    print(f"{'='*80}\n")
+
+    for method_name, (lower, upper) in intervals_dict.items():
+        # Compute binary coverage
+        covered = (y_true >= lower) & (y_true <= upper)
+        valid_mask = ~np.isnan(lower) & ~np.isnan(upper)
+
+        recovery_times = []
+        failed_recoveries = 0
+
+        for switch_idx in switches:
+            # Look at window after switch
+            start_idx = switch_idx
+            end_idx = min(switch_idx + window_size * 3, len(covered))  # Look up to 3x window
+
+            if start_idx >= len(covered):
+                continue
+
+            # Compute rolling coverage after switch
+            recovered = False
+            recovery_time = None
+
+            for t in range(start_idx, end_idx):
+                # Compute coverage in rolling window [t, t+window_size]
+                window_end = min(t + window_size, len(covered))
+                window_mask = valid_mask[t:window_end]
+
+                if np.sum(window_mask) == 0:
+                    continue
+
+                window_coverage = np.mean(covered[t:window_end][window_mask])
+
+                if window_coverage >= threshold:
+                    recovery_time = t - start_idx
+                    recovered = True
+                    break
+
+            if recovered:
+                recovery_times.append(recovery_time)
+            else:
+                failed_recoveries += 1
+
+        # Compute statistics
+        if len(recovery_times) > 0:
+            mean_recovery = np.mean(recovery_times)
+            median_recovery = np.median(recovery_times)
+        else:
+            mean_recovery = np.nan
+            median_recovery = np.nan
+
+        metrics[method_name] = {
+            'mean_recovery_time': mean_recovery,
+            'median_recovery_time': median_recovery,
+            'recovery_times': recovery_times,
+            'failed_recoveries': failed_recoveries,
+            'n_switches': len(switches),
+            'recovery_rate': len(recovery_times) / len(switches) if len(switches) > 0 else 0
+        }
+
+        # Print summary
+        print(f"{method_name}:")
+        print(f"  Mean recovery time: {mean_recovery:.1f} steps")
+        print(f"  Median recovery time: {median_recovery:.1f} steps")
+        print(f"  Recovery rate: {len(recovery_times)}/{len(switches)} "
+              f"({100*len(recovery_times)/len(switches):.1f}%)")
+        print(f"  Failed recoveries: {failed_recoveries}")
+        print()
+
+    return metrics
+
+
+def plot_recovery_comparison(
+    recovery_metrics: dict,
+    save_path: Optional[str] = None
+):
+    """
+    Visualize recovery time comparison across methods.
+
+    Parameters
+    ----------
+    recovery_metrics : dict
+        Output from compute_recovery_metrics()
+    save_path : str, optional
+        Path to save figure
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Separate ACI gamma methods from others
+    aci_gamma_methods = {}
+    other_methods = {}
+
+    for method_name, metrics in recovery_metrics.items():
+        if 'ACI (γ=' in method_name:
+            # Extract gamma value
+            gamma_str = method_name.split('γ=')[1].rstrip(')')
+            aci_gamma_methods[float(gamma_str)] = (method_name, metrics)
+        else:
+            other_methods[method_name] = metrics
+
+    # Plot 1: Recovery time vs gamma (for ACI methods)
+    if aci_gamma_methods:
+        gamma_values = sorted(aci_gamma_methods.keys())
+        mean_times = []
+        median_times = []
+
+        for gamma in gamma_values:
+            _, metrics = aci_gamma_methods[gamma]
+            mean_times.append(metrics['mean_recovery_time'])
+            median_times.append(metrics['median_recovery_time'])
+
+        ax1.plot(gamma_values, mean_times, 'o-', linewidth=2, markersize=8,
+                label='Mean recovery time', color='C0')
+        ax1.plot(gamma_values, median_times, 's--', linewidth=2, markersize=8,
+                label='Median recovery time', color='C1')
+
+        ax1.set_xlabel('Gamma value (learning rate)', fontsize=11)
+        ax1.set_ylabel('Recovery time (steps)', fontsize=11)
+        ax1.set_title('Recovery Time vs Gamma\n(Lower is better - faster adaptation)',
+                     fontsize=12, fontweight='bold')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        ax1.set_xscale('log')
+    else:
+        ax1.text(0.5, 0.5, 'No ACI gamma methods found',
+                ha='center', va='center', transform=ax1.transAxes)
+
+    # Plot 2: Recovery rate comparison (all methods)
+    method_names = []
+    recovery_rates = []
+    colors = []
+
+    # Add other methods first
+    for method_name, metrics in other_methods.items():
+        method_names.append(method_name)
+        recovery_rates.append(metrics['recovery_rate'] * 100)
+        if 'AgACI' in method_name:
+            colors.append('C3')
+        elif 'Naive' in method_name:
+            colors.append('C0')
+        else:
+            colors.append('C2')
+
+    # Add ACI gamma methods
+    if aci_gamma_methods:
+        gamma_cmap = plt.cm.viridis(np.linspace(0.2, 0.9, len(aci_gamma_methods)))
+        for i, (gamma, (method_name, metrics)) in enumerate(sorted(aci_gamma_methods.items())):
+            method_names.append(f'γ={gamma:.4f}')
+            recovery_rates.append(metrics['recovery_rate'] * 100)
+            colors.append(gamma_cmap[i])
+
+    x_pos = np.arange(len(method_names))
+    ax2.bar(x_pos, recovery_rates, color=colors, alpha=0.7, edgecolor='black')
+    ax2.set_xlabel('Method', fontsize=11)
+    ax2.set_ylabel('Recovery rate (%)', fontsize=11)
+    ax2.set_title('Coverage Recovery Success Rate\n(Higher is better)',
+                 fontsize=12, fontweight='bold')
+    ax2.set_xticks(x_pos)
+    ax2.set_xticklabels(method_names, rotation=45, ha='right', fontsize=9)
+    ax2.set_ylim([0, 105])
+    ax2.axhline(100, color='green', linestyle='--', linewidth=1, alpha=0.5, label='100%')
+    ax2.grid(True, alpha=0.3, axis='y')
+    ax2.legend()
+
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved: {save_path}")
+        plt.close()
+    else:
+        plt.show()
