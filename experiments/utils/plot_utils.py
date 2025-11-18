@@ -31,35 +31,6 @@ def _add_generic_time_labels(ax, dataname, n_points):
             ax.set_xticklabels(xticklabels, rotation=0, fontsize=8)
 
 
-# def _ensure_2d(a):
-#     """Reshape (T, D, 1) -> (T, D). Leave (T, D) as-is."""
-#     if a is None:
-#         return None
-#     if a.ndim == 3 and a.shape[2] == 1:
-#         return a.reshape(a.shape[0], a.shape[1])
-#     return a
-
-# def _safe_trim(x, target_len):
-#     """Trim or pad (shouldn't pad) to match target_len."""
-#     if x is None:
-#         return None
-#     m = min(len(x), target_len)
-#     return x[:m]
-
-# def _ensure_2d(a):
-#     """Make array 2D: (T,) -> (T,1); (T,D,1) -> (T,D)."""
-#     if a is None:
-#         return None
-#     a = np.asarray(a)
-#     if a.ndim == 1:
-#         return a.reshape(-1, 1)
-#     if a.ndim == 3 and a.shape[2] == 1:
-#         return a.reshape(a.shape[0], a.shape[1])
-#     if a.ndim == 2:
-#         return a
-#     # As a last resort, flatten all but time
-#     return a.reshape(a.shape[0], -1)
-
 def plot_results_with_aci(
     dataname: str,
     testOriginal: np.ndarray,              # shape (T, D)
@@ -278,181 +249,144 @@ def plot_results_with_aci(
             print(f"[WARN] Plot regime heatmap failed: {e}")
 
 
-# def plot_results_with_aci00(
-#     dataname,
-#     testOriginal,                # (T, D) or (T, D, 1)
-#     testForecast_mean,           # (T, D) or (T, D, 1)
-#     d_dim,
-#     forecast_d_MC_argmax=None,   # (T, D) or (T,) if available (DS3M regimes)
-
-#     # ---- DS³M intervals (backward-compatible) ----
-#     dsm_lower=None,              # same length as T (or None)
-#     dsm_upper=None,
-
-#     # ---- Generic model intervals (new) ----
-#     model_lower=None,            # e.g., MC-Dropout 5% quantile or GP lower
-#     model_upper=None,            # e.g., MC-Dropout 95% quantile or GP upper
-#     model_interval_label=None,   # legend label for model intervals (str)
-
-#     # ---- ACI / AgACI / Naive (radius-or-bounds) ----
-#     aci_lower=None,              # if you compute asym. bounds, you can pass both
-#     aci_upper=None,              # your current pipeline uses symmetric "upper" as radius
-#     T0=None,                     # train size
-#     target_dim=0,
-#     coverage=None,
-#     width=None,
-
-#     # ---- meta for titles & filenames (new) ----
-#     model_name=None,             # e.g., "S4", "CPD", "MCDropoutGRU", "GPTorchSparse", "DS3M"
-#     interval_method_name=None,   # e.g., "ACI", "AgACI", "Naive"
-#     save_dir_root="figures",     # base folder
-#     show=True,                   # call plt.show()
-# ):
-#     """
-#     Backward compatible with your original DS3M plotter.
-#     Also supports generic model predictive intervals and method/model labeling.
-#     """
-#     testOriginal = _ensure_2d(testOriginal)
-#     testForecast_mean = _ensure_2d(testForecast_mean)
-
-#     if testOriginal is None or testForecast_mean is None:
-#         raise ValueError("testOriginal/testForecast_mean cannot be None.")
-#     T, D = testOriginal.shape
-#     if testForecast_mean.shape[0] != T:
-#         raise ValueError("Time length mismatch for testForecast_mean/testOriginal")
-#     if target_dim < 0 or target_dim >= D:
-#         raise ValueError(f"target_dim={target_dim} is out of range for D={D}")
-#     # If ACI arrays are longer than the available [T0:] segment, trim them safely
-#     if (aci_upper is not None) and (T0 is not None):
-#         test_len = max(0, T - T0)
-#         if len(aci_upper) != test_len:
-#             min_len = min(len(aci_upper), test_len)
-#             aci_upper = aci_upper[:min_len] 
-#             aci_lower = aci_lower[:min_len] if aci_lower is not None else None
-#     print(f"[PLOT] Using target_dim={target_dim} of D={D}, T={T}, T0={T0}")
-#     print("testForecast_mean", testForecast_mean)
-#     y_true_1d = testOriginal[:, target_dim]
-#     y_pred_1d = testForecast_mean[:, target_dim]
-#     nan_idx_true = np.where(np.isnan(y_true_1d))[0]
-#     nan_idx_pred = np.where(np.isnan(y_pred_1d))[0]
-
-#     print("NaN indices in y_true:", nan_idx_true)
-#     print("NaN indices in y_pred:", nan_idx_pred)
-#     tt = np.arange(T)
-
-#     # ---------- Figure 1: Prediction with optional model intervals + ACI ----------
-#     plt.figure(figsize=(11.5, 4.2))
-#     # Base truth curve (full horizon)
-#     plt.plot(tt, y_true_1d, color="black", lw=1.0, alpha=0.65, label="True (all)")
-
-#     # ----- DS³M MC intervals (legacy) or Generic Model intervals -----
-#     drew_model_band = False
- 
-#     if dsm_lower is not None and dsm_upper is not None:
-#         dl = dsm_lower[:, target_dim] if dsm_lower.ndim == 2 else dsm_lower
-#         du = dsm_upper[:, target_dim] if dsm_upper.ndim == 2 else dsm_upper
-#         if len(dl) == T and len(du) == T:
-#             plt.fill_between(tt, dl, du, color="gray", alpha=0.25, label="DS³M MC interval")
-#             drew_model_band = True
-
-#     if (model_lower is not None) and (model_upper is not None):
-#         ml = model_lower[:, target_dim] if model_lower.ndim == 2 else model_lower
-#         mu = model_upper[:, target_dim] if model_upper.ndim == 2 else model_upper
-#         if len(ml) == T and len(mu) == T:
-#             lab = model_interval_label or "Model interval"
-#             plt.fill_between(tt, ml, mu, color="lightgray", alpha=0.3, label=lab)
-#             drew_model_band = True
-
-#     # ----- ACI (or AgACI/Naive) intervals on test split only -----
-#     if (aci_lower is not None or aci_upper is not None) and T0 is not None:
-#         test_len = T - T0
-#         tt_test = np.arange(T0, T)
-#         # Backward-compatible: your pipeline uses aci_upper as a symmetric radius "r_t".
-#         # If both provided, we still use aci_upper as radius; you can customize below if needed.
-#         # Trim if mismatched length
-#         if aci_upper is not None:
-#             aci_upper = _safe_trim(aci_upper, test_len)
-#             tt_test = tt_test[: len(aci_upper)]
-
-#         print(f"[PLOT] ACI len={len(aci_upper)} for test_len={test_len} (T0={T0})")
-#         print(f"[PLOT] ACI upper (r_t) stats: min={np.min(aci_upper):.3f}, max={np.max(aci_upper):.3f}, mean={np.mean(aci_upper):.3f}")
-#         # Overlay True + Pred on test window
-#         print(f"[PLOT] Plotting test segment t=[{T0},{T}) len={len(tt_test)}")
-#         print(f"[PLOT] y_true test segment: min={np.min(y_true_1d[T0:T0+len(tt_test)]):.3f}, max={np.max(y_true_1d[T0:T0+len(tt_test)]):.3f}, mean={np.mean(y_true_1d[T0:T0+len(tt_test)]):.3f}")
-#         print(f"[PLOT] y_pred test segment: min={np.min(y_pred_1d[T0:T0+len(tt_test)]):.3f}, max={np.max(y_pred_1d[T0:T0+len(tt_test)]):.3f}, mean={np.mean(y_pred_1d[T0:T0+len(tt_test)]):.3f}")
-#         plt.plot(tt_test, y_true_1d[T0 : T0 + len(tt_test)], color="black", lw=1.0, label="True (test)")
-#         plt.plot(tt_test, y_pred_1d[T0 : T0 + len(tt_test)], color="tab:blue", lw=1.2, label="Pred")
-
-#         if aci_upper is not None and len(aci_upper) == len(tt_test):
-#             # symmetric band around y_pred
-#             lower_band = y_pred_1d[T0 : T0 + len(tt_test)] - aci_upper
-#             upper_band = y_pred_1d[T0 : T0 + len(tt_test)] + aci_upper
-#             plt.fill_between(tt_test, lower_band, upper_band, color="orange", alpha=0.30,
-#                              label=f"{interval_method_name or 'ACI'} interval")
-
-#     # Title with meta
-#     title_bits = [dataname, f"dim={target_dim}"]
-#     print(f"Plotting results for {model_name}")
-#     if model_name:
-#         title_bits.insert(0, model_name)
-#     if interval_method_name:
-#         title_bits.append(interval_method_name)
-#     if coverage is not None:
-#         title_bits.append(f"coverage={coverage:.3f}")
-#     if width is not None:
-#         title_bits.append(f"width={width:.3f}")
-#     plt.title(" | ".join(title_bits))
-#     print(f"Plotting title_bits for {title_bits}")
-#     # plt.title(" | ".join(str(title_bits)))
-#     plt.legend(loc="upper left")
-#     plt.tight_layout()
-
-#     # Save
-#     fig_dir = os.path.join(save_dir_root, "aci_results")
-#     os.makedirs(fig_dir, exist_ok=True)
-#     tag_model = (model_name or "model").replace(" ", "_")
-#     tag_method = (interval_method_name or "ACI").replace(" ", "_")
-#     out_png = os.path.join(fig_dir, f"{dataname}__{tag_model}__{tag_method}__dim{target_dim}.png")
-#     plt.savefig(out_png, dpi=200, bbox_inches="tight")
-#     if show:
-#         plt.show()
-#     plt.close()
-#     print(f"[FIG] Saved: {out_png}")
-
-#     # ---------- Figure 2 (optional): regime heatmap for DS³M ----------
-#     if forecast_d_MC_argmax is not None and d_dim is not None:
-#         try:
-#             arr = forecast_d_MC_argmax
-#             if arr.ndim == 2 and arr.shape[1] == 1:
-#                 arr = arr.reshape(-1)
-#             elif arr.ndim == 2 and arr.shape[0] == 1:
-#                 arr = arr.reshape(-1)
-#             elif arr.ndim == 2 and arr.shape[0] == T:
-#                 arr = arr[:, 0]  # if (T,D) keep dim 0 for heatmap
-
-#             cmap_states = plt.get_cmap("RdBu", d_dim if d_dim is not None else 2)
-#             plt.figure(figsize=(11.5, 1.8))
-#             sns.heatmap(
-#                 arr.reshape(1, -1),
-#                 linewidth=0,
-#                 cbar=False,
-#                 alpha=1,
-#                 cmap=cmap_states,
-#                 vmin=0,
-#                 vmax=(d_dim - 1 if d_dim is not None else 1),
-#             )
-#             plt.title(f"{dataname} | {model_name or 'DS3M'} discrete states")
-#             plt.yticks([])
-#             plt.xlabel("time")
-#             plt.tight_layout()
-
-#             hdir = os.path.join(save_dir_root, "regime_heatmap")
-#             os.makedirs(hdir, exist_ok=True)
-#             out_hm = os.path.join(hdir, f"{dataname}__{tag_model}__regime.png")
-#             plt.savefig(out_hm, dpi=200, bbox_inches="tight")
-#             if show:
-#                 plt.show()
-#             plt.close()
-#             print(f"[FIG] Saved: {out_hm}")
-#         except Exception as e:
-#             print(f"[WARN] Plot regime heatmap failed: {e}")
+def plot_regime_comparison(
+    y_true,
+    y_pred,
+    y_lower,
+    y_upper,
+    d_true,
+    d_pred,
+    test_start,
+    save_path=None
+):
+    """
+    Plot comparing true vs predicted regimes with forecast intervals.
+    
+    Parameters
+    ----------
+    y_true : np.ndarray, shape (N,)
+        True observations
+    y_pred : np.ndarray, shape (test_len,)
+        Predicted observations (test set only)
+    y_lower, y_upper : np.ndarray, shape (test_len,)
+        Prediction intervals (test set only)
+    d_true : np.ndarray, shape (N,)
+        True regime labels (full dataset)
+    d_pred : np.ndarray, shape (N,)
+        Predicted regime labels (full dataset)
+    test_start : int
+        Index where test set starts
+    save_path : str, optional
+        Path to save the figure
+    """
+    fig, axes = plt.subplots(3, 1, figsize=(14, 10))
+    
+    N_full = len(d_true)
+    time_full = np.arange(N_full)
+    test_len = len(y_pred)
+    time_test = np.arange(test_start, test_start + test_len)
+    
+    # === Top plot: True observations with true regimes ===
+    ax = axes[0]
+    
+    # Color by true regime
+    for regime_id in np.unique(d_true):
+        mask = (d_true == regime_id)
+        ax.scatter(time_full[mask], y_true[mask],
+                  c=f'C{regime_id}', s=10, alpha=0.5,
+                  label=f'Regime {regime_id} (True)')
+    
+    # Mark true regime switches
+    true_switches = np.where(np.diff(d_true) != 0)[0] + 1
+    for sw in true_switches:
+        ax.axvline(sw, color='red', linestyle='--', alpha=0.3, linewidth=1)
+    
+    ax.axvline(test_start, color='black', linestyle=':', linewidth=2, label='Train/Test split')
+    ax.set_xlabel('Time', fontsize=11)
+    ax.set_ylabel('Observation', fontsize=11)
+    ax.set_title('True Observations with True Regime Labels', fontsize=13, fontweight='bold')
+    ax.legend(loc='upper right', fontsize=9)
+    ax.grid(True, alpha=0.3)
+    
+    # === Middle plot: Model predictions with predicted regimes ===
+    ax = axes[1]
+    
+    # Color full dataset by predicted regime
+    for regime_id in np.unique(d_pred):
+        mask = (d_pred == regime_id)
+        ax.scatter(time_full[mask], y_true[mask],
+                  c=f'C{regime_id}', s=10, alpha=0.3,
+                  label=f'Regime {regime_id} (Predicted)')
+    
+    # Plot test set predictions with intervals
+    ax.plot(time_test, y_pred, 'g-', linewidth=2, label='Prediction', zorder=10)
+    ax.fill_between(time_test, y_lower, y_upper,
+                    color='green', alpha=0.2, label='90% PI')
+    
+    # Mark predicted regime switches
+    pred_switches = np.where(np.diff(d_pred) != 0)[0] + 1
+    for sw in pred_switches:
+        ax.axvline(sw, color='blue', linestyle='--', alpha=0.3, linewidth=1)
+    
+    ax.axvline(test_start, color='black', linestyle=':', linewidth=2, label='Train/Test split')
+    ax.set_xlabel('Time', fontsize=11)
+    ax.set_ylabel('Observation', fontsize=11)
+    ax.set_title('Model Predictions with Predicted Regime Labels', fontsize=13, fontweight='bold')
+    ax.legend(loc='upper right', fontsize=9)
+    ax.grid(True, alpha=0.3)
+    
+    # === Bottom plot: Regime comparison (test set only) ===
+    ax = axes[2]
+    
+    d_true_test = d_true[test_start:test_start + test_len]
+    d_pred_test = d_pred[test_start:test_start + test_len]
+    time_test_rel = np.arange(test_len)
+    
+    # Plot both as lines
+    ax.plot(time_test_rel, d_true_test, 'r-', linewidth=2, label='True regime', alpha=0.7)
+    ax.plot(time_test_rel, d_pred_test, 'b--', linewidth=2, label='Predicted regime', alpha=0.7)
+    
+    # Shade disagreement regions
+    disagree_mask = (d_true_test != d_pred_test)
+    if np.any(disagree_mask):
+        ax.fill_between(time_test_rel, 0, np.max(d_true_test) + 0.5,
+                       where=disagree_mask, color='yellow', alpha=0.3,
+                       label='Disagreement')
+    
+    # Mark switches
+    true_switches_test = np.where(np.diff(d_true_test) != 0)[0] + 1
+    pred_switches_test = np.where(np.diff(d_pred_test) != 0)[0] + 1
+    
+    for sw in true_switches_test:
+        ax.axvline(sw, color='red', linestyle='--', alpha=0.5, linewidth=1.5)
+    for sw in pred_switches_test:
+        ax.axvline(sw, color='blue', linestyle=':', alpha=0.5, linewidth=1.5)
+    
+    # Calculate accuracy
+    accuracy = np.mean(d_true_test == d_pred_test) * 100
+    
+    ax.set_xlabel('Time (relative to test start)', fontsize=11)
+    ax.set_ylabel('Regime ID', fontsize=11)
+    ax.set_title(f'Regime Comparison (Test Set) - Accuracy: {accuracy:.1f}%', 
+                fontsize=13, fontweight='bold')
+    ax.legend(loc='upper right', fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim([-0.5, np.max([d_true_test.max(), d_pred_test.max()]) + 0.5])
+    
+    plt.tight_layout()
+    
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved regime comparison plot to: {save_path}")
+        plt.close()
+    else:
+        plt.show()
+    
+    # Print statistics
+    print(f"\n=== Regime Comparison Statistics ===")
+    print(f"True switches (full dataset): {len(np.where(np.diff(d_true) != 0)[0])}")
+    print(f"Predicted switches (full dataset): {len(np.where(np.diff(d_pred) != 0)[0])}")
+    print(f"True switches (test set): {len(true_switches_test)}")
+    print(f"Predicted switches (test set): {len(pred_switches_test)}")
+    print(f"Regime accuracy (test set): {accuracy:.2f}%")

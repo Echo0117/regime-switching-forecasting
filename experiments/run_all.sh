@@ -19,6 +19,11 @@ S4_PATH="./s4"
 # Output CSV (single combined table for *all* datasets)
 OUTCSV="experiments/results_all_${DEVICE}.csv"
 
+# Save directory for plots (use /tmp for local fast I/O, avoiding OneDrive sync issues)
+SAVE_DIR="${SAVE_DIR:-/tmp/regime_switching_figures}"
+mkdir -p "${SAVE_DIR}"
+echo "[INFO] Plots will be saved to: ${SAVE_DIR}"
+
 # Common sweep settings
 LAGS="${LAGS:-48}"
 ALPHA="${ALPHA:-0.1}"
@@ -35,9 +40,9 @@ METHODS=("Naive" "ACI" "AGACI")
 
 # Datasets to loop
 PROBLEMS=(
-  # "Toy"
+  "Toy"
   # "Sleep"
-  "Unemployment"
+  # "Unemployment"
   # "Lorenz"
   # "Hangzhou"
   # "Electricity"
@@ -83,6 +88,7 @@ for PROB in "${PROBLEMS[@]}"; do
        "${MODEL_ARGS[@]}"
        --device "${DEVICE}" ${AMP_FLAG}
        --csv "${TMPCSV}"
+       --save-dir "${SAVE_DIR}"
   )
 
   # Append optional S4 path only if set
@@ -108,4 +114,8 @@ done
 
 echo "====================================="
 echo " Done. Combined CSV at: ${OUTCSV}"
+echo " Plots saved to: ${SAVE_DIR}"
+echo ""
+echo " To copy plots back to project:"
+echo "   cp -r ${SAVE_DIR}/* figures/"
 echo "====================================="

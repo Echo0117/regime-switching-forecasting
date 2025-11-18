@@ -15,6 +15,7 @@ import argparse
 import os
 import sys
 import numpy as np
+import pandas as pd
 
 HERE = os.path.dirname(__file__)
 PROJ = os.path.abspath(os.path.join(HERE, ".."))
@@ -41,19 +42,46 @@ from experiments.utils.regime_switch_analysis import (
 )
 
 
+def load_ground_truth_regimes_toy():
+    """Load ground truth regime labels for Toy data from CSV.
+
+    Returns:
+        np.ndarray: Ground truth regime labels (full dataset: 2001 points for d, 2000 for y)
+    """
+    from pathlib import Path
+    toy_data_dir = Path("Deep_Switching_State_Space_Model/data/Toy")
+    d_csv_path = toy_data_dir / "simulation_data_nonlinear_d.csv"
+
+    if not d_csv_path.exists():
+        raise FileNotFoundError(
+            f"Ground truth regime file not found: {d_csv_path}\n"
+            "Oracle switches are only available for Toy data with single-switch test set."
+        )
+
+    d_true = pd.read_csv(d_csv_path, header=None).values.flatten()
+    print(f"✓ Loaded ground truth regimes from {d_csv_path}")
+    print(f"  - Total length: {len(d_true)}")
+    print(f"  - Unique regimes: {np.unique(d_true)}")
+    print(f"  - Number of switches: {np.sum(np.diff(d_true) != 0)}")
+
+    return d_true
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--problem", default="Electricity",
                     choices=["Toy", "Lorenz", "Sleep", "Unemployment", "Hangzhou", "Seattle", "Pacific", "Electricity"])
     ap.add_argument("--aci_train_size", type=int, default=20)
     ap.add_argument("--alpha", type=float, default=0.1)
-    ap.add_argument("--tab-gamma", type=float, nargs="*", default=[0.0025, 0.005, 0.01, 0.02, 0.05])
+    ap.add_argument("--tab-gamma", type=float, nargs="*", default=[0.001, 0.01, 0.02, 0.5, 0.99])
     ap.add_argument("--agaci-eta", type=float, default=0.5, help="Learning rate for AgACI BOA (increased from 0.1 to 0.5 for faster adaptation)")
     ap.add_argument("--agaci-lr-schedule", type=str, default="constant",
                     choices=["constant", "sqrt", "log", "poly025", "poly06"],
                     help="Learning rate schedule for AgACI BOA (default: constant, best for regime-switching)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--d-dim", type=int, default=2, help="Number of regimes (default=2 for simpler experiments)")
+    ap.add_argument("--use-oracle-switches", action="store_true", default=False,
+                    help="Use ground truth (oracle) regime switches for Toy data (default: False, uses model predictions)")
 
     args = ap.parse_args()
     np.random.seed(args.seed)
@@ -130,10 +158,69 @@ def main():
     d_argmax_test = np.asarray(d_argmax_test).reshape(-1)
     test_len = int(ds["test_len"])
 
+    # ---------------------------------------------------
+    # Load ground truth regimes for Toy data if using oracle switches
+    # ---------------------------------------------------
+    d_true_full = None
+    d_true_test = None
+
+    if args.use_oracle_switches:
+        if args.problem != "Toy":
+            print(f"\n{'='*60}")
+            print(f"WARNING: --use-oracle-switches is only supported for Toy data.")
+            print(f"Current dataset: {args.problem}")
+            print(f"Falling back to model-predicted regimes (d_argmax).")
+            print(f"{'='*60}\n")
+        else:
+            print(f"\n{'='*60}")
+            print("USING ORACLE (GROUND TRUTH) REGIME SWITCHES")
+            print(f"{'='*60}")
+            try:
+                d_true_full = load_ground_truth_regimes_toy()
+
+                # Extract test portion of ground truth regimes
+                # d_true has 2001 points (includes initial state), y has 2000 points
+                # Test set is last test_len points
+                # Match d_argmax_test indexing
+                d_true_test = d_true_full[-test_len:]
+
+                print(f"\n  - Ground truth test regimes extracted: {len(d_true_test)} points")
+                print(f"  - Oracle switches in test set: {np.sum(np.diff(d_true_test) != 0)}")
+                print(f"{'='*60}\n")
+
+            except FileNotFoundError as e:
+                print(f"\n{'='*60}")
+                print(f"ERROR: {e}")
+                print(f"Falling back to model-predicted regimes (d_argmax).")
+                print(f"{'='*60}\n")
+                d_true_full = None
+                d_true_test = None
+
+    # Determine which regimes to use for analysis
+    if d_true_full is not None and d_true_test is not None:
+        regimes_full_for_analysis = d_true_full
+        regimes_test_for_analysis = d_true_test
+        regime_source = "ORACLE (Ground Truth)"
+    else:
+        regimes_full_for_analysis = d_argmax_full
+        regimes_test_for_analysis = d_argmax_test
+        regime_source = "MODEL (d_argmax)"
+
+    print(f"\n{'='*60}")
+    print(f"REGIME SOURCE FOR ANALYSIS: {regime_source}")
+    print(f"{'='*60}\n")
+
     print(f"Test length: {test_len}")
     print(f"Full dataset length: {N_full}")
-    print(f"Number of regime switches (full): {np.sum(np.diff(d_argmax_full) != 0)}")
-    print(f"Number of regime switches (test): {np.sum(np.diff(d_argmax_test) != 0)}")
+    print(f"\nRegime switches ({regime_source}):")
+    print(f"  - Full dataset: {np.sum(np.diff(regimes_full_for_analysis) != 0)} switches")
+    print(f"  - Test set: {np.sum(np.diff(regimes_test_for_analysis) != 0)} switches")
+
+    # Also print model switches for comparison when using oracle
+    if args.use_oracle_switches and d_true_full is not None:
+        print(f"\nModel switches (d_argmax) for comparison:")
+        print(f"  - Full dataset: {np.sum(np.diff(d_argmax_full) != 0)} switches")
+        print(f"  - Test set: {np.sum(np.diff(d_argmax_test) != 0)} switches")
 
     # Prepare data
     y_full = np.asarray(ds["data"])
@@ -229,6 +316,10 @@ def main():
     gamma_max = max(args.tab_gamma)
     param_suffix = f"eta{args.agaci_eta:.2f}_lr{args.agaci_lr_schedule}_gamma{gamma_min:.4f}-{gamma_max:.4f}_alpha{args.alpha:.2f}_ddim{args.d_dim}"
 
+    # Add oracle indicator to folder name if using ground truth
+    if args.use_oracle_switches and d_true_full is not None:
+        param_suffix += "_oracle"
+
     # Put parameter info in folder name instead of file name
     save_dir = f"figures/agaci_test/{args.problem}_{param_suffix}"
     os.makedirs(save_dir, exist_ok=True)
@@ -243,7 +334,7 @@ def main():
     print("\n0a. Plotting regime heatmap for full dataset (all windows)...")
     test_start_in_full = N_full - test_len  # Where test set starts in full data
     plot_regime_heatmap_full(
-        d_argmax=d_argmax_full,
+        d_argmax=regimes_full_for_analysis,  # Use oracle if available, else model
         d_dim=args.d_dim,
         dataname=args.problem,
         timestamps=None,  # Can't use timestamps for full window sequence
@@ -256,7 +347,7 @@ def main():
     print("\n0b. Plotting regime heatmap for test set only (with timestamps)...")
     timestamps_test = load_timestamps_for_dataset(args.problem, test_len, from_end=True)
     plot_regime_heatmap_full(
-        d_argmax=d_argmax_test,
+        d_argmax=regimes_test_for_analysis,  # Use oracle if available, else model
         d_dim=args.d_dim,
         dataname=args.problem,
         timestamps=timestamps_test,
@@ -265,14 +356,15 @@ def main():
     )
 
     # Plot 0c: d_argmax verification (data + regime switches)
-    print("\n0c. Plotting d_argmax verification (test set)...")
+    regime_label = "oracle" if (args.use_oracle_switches and d_true_full is not None) else "d_argmax"
+    print(f"\n0c. Plotting {regime_label} verification (test set)...")
     plot_d_argmax_verification(
-        d_argmax=d_argmax_test,
+        d_argmax=regimes_test_for_analysis,  # Use oracle if available, else model
         y_data=y_true,
         d_dim=args.d_dim,
         dataname=args.problem,
         timestamps=timestamps_test,
-        save_path=f"{save_dir}/d_argmax_verification_test.png",
+        save_path=f"{save_dir}/{regime_label}_verification_test.png",
         plot_scope="test"
     )
 
@@ -289,7 +381,7 @@ def main():
 
     plot_agaci_weights_at_switches(
         agaci_weights=weights_lower_full,  # (n_gammas, N_full) with NaN padding
-        d_argmax=d_argmax_full,  # Use full dataset regimes
+        d_argmax=regimes_full_for_analysis,  # Use oracle if available, else model
         gamma_values=gammas_aci,
         # window_before and window_after will be computed adaptively
         adaptive_window=True,  # Enable adaptive window sizing
@@ -335,7 +427,7 @@ def main():
     plot_coverage_at_switches(
         intervals_dict,
         y_true,
-        d_argmax_test,  # Use test regime for coverage analysis
+        regimes_test_for_analysis,  # Use oracle if available, else model
         adaptive_window=True,  # Use adaptive window sizing
         save_path=f"{save_dir}/coverage_at_switches.png"
     )
@@ -345,7 +437,7 @@ def main():
     plot_length_at_switches(
         intervals_dict,
         y_true,
-        d_argmax_test,
+        regimes_test_for_analysis,  # Use oracle if available, else model
         adaptive_window=True,
         save_path=f"{save_dir}/length_at_switches.png"
     )
@@ -355,7 +447,7 @@ def main():
     plot_coverage_full_timeline(
         intervals_dict,
         y_true,
-        d_argmax_test,  # Use test regime for coverage analysis
+        regimes_test_for_analysis,  # Use oracle if available, else model
         timestamps=timestamps_test,  # Use same timestamps as test heatmap
         save_path=f"{save_dir}/coverage_full_timeline.png"
     )
@@ -365,7 +457,7 @@ def main():
     plot_coverage_timeline_scatter(
         intervals_dict,
         y_true,
-        d_argmax_test,  # Use test regime for coverage analysis
+        regimes_test_for_analysis,  # Use oracle if available, else model
         timestamps=timestamps_test,  # Use same timestamps as test heatmap
         save_path=f"{save_dir}/coverage_timeline_scatter.png"
     )
@@ -374,11 +466,11 @@ def main():
     print("\n2d. Plotting individual switch trajectories...")
     # Compute window sizes for this plot
     from experiments.utils.regime_switch_analysis import compute_adaptive_window
-    wb, wa = compute_adaptive_window(d_argmax_test, percentile=50)
+    wb, wa = compute_adaptive_window(regimes_test_for_analysis, percentile=50)
     plot_individual_switch_trajectories(
         intervals_dict,
         y_true,
-        d_argmax_test,
+        regimes_test_for_analysis,  # Use oracle if available, else model
         window_before=wb,
         window_after=wa,
         save_path=f"{save_dir}/individual_switch_trajectories.png"
@@ -389,7 +481,7 @@ def main():
     plot_coverage_raw_timeline(
         intervals_dict,
         y_true,
-        d_argmax_test,
+        regimes_test_for_analysis,  # Use oracle if available, else model
         timestamps=timestamps_test,
         save_path=f"{save_dir}/coverage_raw_timeline.png",
         highlight_switches=True
@@ -400,7 +492,7 @@ def main():
     recovery_metrics = compute_recovery_metrics(
         intervals_dict,
         y_true,
-        d_argmax_test,
+        regimes_test_for_analysis,  # Use oracle if available, else model
         target_coverage=1.0 - args.alpha,  # 0.9 for alpha=0.1
         recovery_threshold=0.85,  # 85% of target
         window_size=10

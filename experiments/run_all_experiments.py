@@ -3,29 +3,47 @@
 Run paper benchmarks and export a single CSV with:
 Model, IntervalMethod, RMSE, Coverage@90, MedianLen, PctInfinite, Notes
 """
+import sys
+sys.stdout.write("[TRACE] Script started\n")
+sys.stdout.flush()
 
-import argparse, os, sys, csv, math, numpy as np
+import argparse, os, csv, math, numpy as np
+sys.stdout.write("[TRACE] Basic imports done\n")
+sys.stdout.flush()
 
+# Set matplotlib backend to non-interactive to avoid hanging
+import matplotlib
+matplotlib.use('Agg')
+print("[INFO] Matplotlib backend set to 'Agg'")
+
+print("[INFO] Setting up paths...")
 HERE = os.path.dirname(__file__)
 PROJ = os.path.abspath(os.path.join(HERE, ".."))
 for p in [HERE, PROJ]:
     if p not in sys.path:
         sys.path.insert(0, p)
+print(f"[INFO] HERE={HERE}")
+print(f"[INFO] PROJ={PROJ}")
 
 # from experiments.ds3m_wrapper import DS3MWrapper
+print("[INFO] Importing acp_utils...")
 from experiments.utils.acp_utils import aci_intervals, agaci_intervals
+print("[INFO] Importing ds3m_utils...")
 from experiments.utils.ds3m_utils import ds3m_to_tabular_all, forecast, load_ds3m_data, load_ds3m_model, get_full_d_argmax
+print("[INFO] Importing plot_utils...")
 from experiments.utils.plot_utils import plot_results_with_aci
+print("[INFO] Importing regime_switch_analysis...")
 from experiments.utils.regime_switch_analysis import (
     plot_agaci_weights_at_switches,
     plot_coverage_at_switches,
-    plot_coverage_full_timeline,
     plot_coverage_vs_length_tradeoff,
     plot_regime_heatmap_full,
     detect_regime_switches,
     load_timestamps_for_dataset
 )
+print("[INFO] Importing ds3m_wrapper...")
 from experiments.ds3m_wrapper import build_model
+print("[INFO] All imports completed successfully!")
 
 # ---------------------------
 # Helpers
@@ -155,7 +173,12 @@ def _fetch_ds3m_outputs(args):
 
 
 def evaluate_one(problem: str, model_name: str, interval_method: str, args):
+    print(f"\n[INFO] Evaluating {model_name} + {interval_method} on {problem}...")
+
+    # Load DS3M data once and reuse it
+    print(f"[INFO] Loading DS3M data for {problem}...")
     ds = load_ds3m_data(args)
+    print(f"[INFO] DS3M data loaded successfully")
 
     # Use the processed data after reshaping (not RawDataOriginal which may have different structure)
     # ds["data"] has shape (T, D) after RawData.reshape(-1, RawData.shape[2])
@@ -204,9 +227,9 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args):
     gid = None
 
     # --- Fetch DS³M uq/lq and d-argmax first (needed for Naive method) ---
-    ds3m = build_model(args)
-    res = getattr(ds3m, "_get_ds3m_forecast", lambda a: None)(args)
+    print(f"[INFO] Loading DS3M model and generating forecast...")
     res = _fetch_ds3m_outputs(args)
+    print(f"[INFO] DS3M forecast generated successfully")
 
     # --- Slice DS³M uq/lq and d-argmax to the SAME eval window ---
     y_uq_full = np.asarray(res["y_uq"])
@@ -217,16 +240,12 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args):
     if interval_method.upper() == "NAIVE":
         # Naive: use DS3M's original Monte Carlo intervals (testForecast_uq, testForecast_lq)
         # Use FULL test set intervals without slicing (same as test_agaci.py)
-        print("[Naive] Using DS3M MC intervals (full test set)")
+        print("[INFO] [Naive] Using DS3M MC intervals (full test set)")
         td = target_dim_aci
         td = np.clip(td, 0, y_uq_full.shape[1]-1)
         # Extract full test set intervals (no slicing)
         lo_full_naive = y_lq_full[:, td]     # Full test set, length = test_len
         up_full_naive = y_uq_full[:, td]     # Full test set, length = test_len
-
-        # Debug: Print range to verify it matches test_agaci.py
-        print(f"[Naive] Full test set: {len(lo_full_naive)} points, range=[{np.min(lo_full_naive):.2f}, {np.max(up_full_naive):.2f}]")
-
         # For evaluation, slice from T0 onwards
         lo_full = lo_full_naive[T0:]         # length = test_len - T0
         up_full = up_full_naive[T0:]         # length = test_len - T0
@@ -234,7 +253,9 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args):
 
     elif interval_method.upper() == "AGACI":
         # Run AgACI with BOA aggregation
+        print("[INFO] [AgACI] Running AgACI with BOA aggregation...")
         agaci_results = agaci_intervals(X_dummy, y_full, basemodel="ds3m", args=args)
+        print("[INFO] [AgACI] Completed successfully")
 
         lo_full = agaci_results['lower']
         up_full = agaci_results['upper']
@@ -248,7 +269,9 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args):
 
     else:
         # ACI: Run standard ACI with multiple gammas and select best
+        print("[INFO] [ACI] Running standard ACI with multiple gammas...")
         y_lowers, y_uppers, tab_alpha_t, gammas = aci_intervals(X_dummy, y_full, args=args)
+        print("[INFO] [ACI] Completed successfully")
 
         # Select best gamma based on coverage and width
         gid, lo_full, up_full = pick_gamma_by_coverage_and_width(
@@ -342,6 +365,10 @@ def evaluate_one(problem: str, model_name: str, interval_method: str, args):
 
 
 def main():
+    print("="*60)
+    print("Starting run_all_experiments.py")
+    print("="*60)
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--problem", default="Unemployment",
                     choices=["Toy","Lorenz","Sleep","Unemployment","Hangzhou","Seattle","Pacific","Electricity"])
@@ -374,6 +401,7 @@ def main():
 
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--csv", default="paper_results.csv")
+    ap.add_argument("--save-dir", default="figures", help="Directory to save plots (use local path to avoid OneDrive sync issues)")
     args = ap.parse_args()
 
     # device
@@ -389,7 +417,12 @@ def main():
 
     rows = []
     all_results = {}  # Store results for regime analysis
-    print(f"Running experiments for problem={args.models} | device={args.methods}")
+    print(f"\n[INFO] Running experiments for problem={args.problem}")
+    print(f"[INFO] Models: {args.models}")
+    print(f"[INFO] Methods: {args.methods}")
+    print(f"[INFO] Device: {device}")
+    print(f"[INFO] Seed: {args.seed}")
+    print(f"[INFO] Output CSV: {args.csv}\n")
 
     for model_name in args.models:
         for method in args.methods:
@@ -429,12 +462,9 @@ def main():
                 'row': row,
             }
 
-            # print(f"[{args.problem}] {model_name} + {method} -> "
-            #       f"RMSE={row['RMSE']:.4f} | Cov={row['Coverage@90']:.3f} | "
-            #       f"MedLen={row['MedianLen']:.3f} | %Inf={row['PctInfinite']:.3f} | {row['Notes']}")
             rows.append(row)
 
-            print(f"Plotting {model_name} + {method} ...")
+            print(f"\n[INFO] Plotting {model_name} + {method} ...")
 
             # plot_results_with_aci(
             #     dataname=args.problem,
@@ -483,9 +513,10 @@ def main():
                 width=float(row["MedianLen"]),
                 model_name=model_name,
                 interval_method_name=method_name,  # "ACI" | "AgACI" | "Naive"
-                save_dir_root="figures",
-                show=True,
+                save_dir_root=args.save_dir,
+                show=False,  # Set to False to avoid hanging in non-interactive environments
             )
+            print(f"[INFO] Plot completed for {model_name} + {method_name}")
 
     # =========================================================================
     # REGIME SWITCHING ANALYSIS
@@ -498,36 +529,16 @@ def main():
         regime_save_dir = f"figures/regime_analysis/{args.problem}"
         os.makedirs(regime_save_dir, exist_ok=True)
 
-        # 1a. Plot regime heatmap for full dataset (all windows)
-        print("\n1a. Plotting regime heatmap for full dataset (all windows)...")
-        ds = load_ds3m_data(args)
-        N_full = len(ds["data"])
-        test_len = int(ds["test_len"])
-        test_start_idx = N_full - test_len
-
+        # 1. Plot regime heatmap for full dataset
+        print("\n1. Plotting regime heatmap (full dataset: train+valid+test)...")
+        # Load timestamps from dataset if available
+        timestamps = load_timestamps_for_dataset(args.problem, len(d_argmax_full))
         plot_regime_heatmap_full(
             d_argmax=d_argmax_full,
             d_dim=d_dim,
             dataname=args.problem,
-            timestamps=None,  # Can't use timestamps for full window sequence
-            save_path=f"{regime_save_dir}/regime_heatmap_full.png",
-            plot_scope="full",
-            test_start_idx=test_start_idx
-        )
-
-        # 1b. Plot regime heatmap for test set only (with real timestamps)
-        print("\n1b. Plotting regime heatmap for test set only (with timestamps)...")
-        res_ds3m = _fetch_ds3m_outputs(args)
-        d_argmax_test = np.asarray(res_ds3m["d_argmax"]).reshape(-1)
-        timestamps_test = load_timestamps_for_dataset(args.problem, test_len, from_end=True)
-
-        plot_regime_heatmap_full(
-            d_argmax=d_argmax_test,
-            d_dim=d_dim,
-            dataname=args.problem,
-            timestamps=timestamps_test,
-            save_path=f"{regime_save_dir}/regime_heatmap_test.png",
-            plot_scope="test"
+            timestamps=timestamps,
+            save_path=f"{regime_save_dir}/regime_heatmap_full.png"
         )
 
         # 2. Plot AgACI weights at regime switches
@@ -568,10 +579,8 @@ def main():
         if y_true_test.ndim > 1:
             y_true_test = y_true_test[:, target_dim_aci]
 
-        # Get d_argmax for test set from DS3M output
-        # res["d_argmax"] contains the test set regimes (length = test_len)
-        res_ds3m = _fetch_ds3m_outputs(args)
-        d_argmax_test = np.asarray(res_ds3m["d_argmax"]).reshape(-1)  # Test set regimes
+        # Get d_argmax for test set
+        d_argmax_test = d_argmax_full[t0_tail:] if len(d_argmax_full) >= t0_tail + test_len else d_argmax_full[-test_len:]
 
         # Build intervals dict (padded intervals aligned with test set)
         intervals_for_coverage = {}
@@ -587,7 +596,6 @@ def main():
 
             intervals_for_coverage[method_name] = (lower_arr, upper_arr)
 
-        # 3a: Windowed coverage around switches
         plot_coverage_at_switches(
             intervals_dict=intervals_for_coverage,
             y_true=y_true_test,  # Full test set
@@ -595,16 +603,6 @@ def main():
             window_before=10,
             window_after=50,
             save_path=f"{regime_save_dir}/coverage_at_switches.png"
-        )
-
-        # 3b: Full timeline coverage
-        print("\n3b. Plotting coverage over full timeline...")
-        plot_coverage_full_timeline(
-            intervals_dict=intervals_for_coverage,
-            y_true=y_true_test,  # Full test set
-            d_argmax=d_argmax_test,  # Test set regimes
-            timestamps=timestamps_test,  # Use same timestamps as test heatmap
-            save_path=f"{regime_save_dir}/coverage_full_timeline.png"
         )
 
         # 4. Plot coverage vs length tradeoff

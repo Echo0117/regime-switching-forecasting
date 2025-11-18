@@ -585,6 +585,112 @@ def get_full_d_argmax(model, ds, forecaststep=1, MC_S=200):
 
     return d_argmax_full
 
+
+def retrain_ds3m_model(
+    ds,
+    n_epochs: int = 80,
+    batch_size: int = 64,
+    verbose: bool = False,
+    init_model=None,
+):
+    """
+    Retrain a DS3M model on the dataset described by ``ds``.
+
+    Parameters
+    ----------
+    ds : dict
+        Dataset dictionary produced by ``load_ds3m_data`` (after any mutations).
+    n_epochs : int
+        Maximum number of epochs to train for.
+    batch_size : int
+        Batch size used in the DS3M training loop.
+    verbose : bool
+        Whether to print progress updates.
+
+    init_model : DSSSM, optional
+        If provided, training will start from this pretrained model instead of
+        reinitialising random weights.
+
+    Returns
+    -------
+    model : DSSSM
+        The retrained DS3M model ready for forecasting.
+    """
+    device = ds["device"]
+    def _build_model():
+        return DSSSM(
+            ds["x_dim"],
+            ds["y_dim"],
+            ds["h_dim"],
+            ds["z_dim"],
+            ds["d_dim"],
+            ds["n_layers"],
+            device,
+            ds.get("bidirection", False),
+        ).to(device)
+
+    if init_model is None:
+        model = _build_model()
+    else:
+        # Warm-start from the provided checkpoint so the model only needs a light fine-tune
+        model = _build_model()
+        model.load_state_dict(copy.deepcopy(init_model.state_dict()))
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=ds["learning_rate"])
+    scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.1, patience=15)
+    # Increase patience for early stopping to allow more training
+    early_stopping = EarlyStopping(patience=50, verbose=False)
+
+    def _loss_to_float(loss_component):
+        if hasattr(loss_component, "item"):
+            return float(loss_component.item())
+        return float(loss_component)
+
+    best_loss = float("inf")
+    best_state = None
+    best_epoch = 0
+    last_epoch = 0
+
+    for epoch in range(1, n_epochs + 1):
+        train_outputs = train(
+            model,
+            optimizer,
+            ds["trainX"],
+            ds["trainY"],
+            epoch,
+            batch_size,
+            n_epochs,
+        )
+        # train returns (d_samples, z_samples, loss, d_post, z_post)
+        loss_value = _loss_to_float(train_outputs[2])
+        if loss_value < best_loss:
+            best_loss = loss_value
+            best_state = copy.deepcopy(model.state_dict())
+            best_epoch = epoch
+        scheduler.step(loss_value)
+        early_stopping(loss_value, model)
+        last_epoch = epoch
+
+        if verbose and epoch % 20 == 0:
+            print(f"    Epoch {epoch}/{n_epochs} | loss={loss_value:.4f}")
+
+        if early_stopping.early_stop:
+            if verbose:
+                print(f"    Early stopping triggered at epoch {epoch}")
+            break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    if verbose:
+        print(
+            f"    Retraining finished after {last_epoch} epochs "
+            f"(best loss={best_loss:.4f} @ epoch {best_epoch})"
+        )
+
+    model.eval()
+    return model
+
 # %%
 # if restore == False:
 
@@ -732,7 +838,11 @@ def load_ds3m_model(
     device,
     bidirection=False,
 ):
-    PATH = os.path.join(directoryBest, "checkpoint.tar")
+    # check if checkpoint exists. if not, load best.tar
+    if os.path.exists(os.path.join(directoryBest, "checkpoint.tar")):
+        PATH = os.path.join(directoryBest, "checkpoint.tar")
+    else:
+        PATH = os.path.join(directoryBest, "best.tar")
 
     model = DSSSM(x_dim, y_dim, h_dim, z_dim, d_dim, n_layers, device, bidirection).to(
         device

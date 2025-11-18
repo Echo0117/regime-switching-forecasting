@@ -14,7 +14,10 @@ from typing import Tuple, List, Optional
 import seaborn as sns
 
 
-def detect_regime_switches(d_argmax: np.ndarray) -> np.ndarray:
+def detect_regime_switches(
+    d_argmax: np.ndarray,
+    min_gap: int = 1
+) -> np.ndarray:
     """
     Detect regime switch points from d_argmax sequence.
 
@@ -22,6 +25,10 @@ def detect_regime_switches(d_argmax: np.ndarray) -> np.ndarray:
     ----------
     d_argmax : np.ndarray, shape (T,)
         Discrete regime indicators over time
+
+    min_gap : int
+        Minimum distance (in timesteps) required between successive switches.
+        Use values >1 to suppress rapid flip-flops caused by noise.
 
     Returns
     -------
@@ -33,7 +40,156 @@ def detect_regime_switches(d_argmax: np.ndarray) -> np.ndarray:
 
     # Find where regime changes
     switches = np.where(np.diff(d_argmax) != 0)[0] + 1
-    return switches
+
+    if len(switches) == 0 or min_gap <= 1:
+        return switches
+
+    filtered = [switches[0]]
+    for idx in switches[1:]:
+        if idx - filtered[-1] >= min_gap:
+            filtered.append(idx)
+
+    return np.array(filtered, dtype=int)
+
+
+def find_isolated_switches(
+    d_argmax: np.ndarray,
+    min_gap: int = 20,
+    return_gaps: bool = False
+):
+    """
+    Find regime switches that are well-isolated (far from other switches).
+
+    Useful for analyzing individual switch behavior without interference
+    from nearby switches.
+
+    Parameters
+    ----------
+    d_argmax : np.ndarray, shape (T,)
+        Regime indicators
+    min_gap : int
+        Minimum distance to next/previous switch (default: 20)
+    return_gaps : bool
+        If True, return gap sizes; if False, return switch indices
+
+    Returns
+    -------
+    isolated_switches : np.ndarray or list of tuples
+        If return_gaps=False: Array of switch indices that are isolated
+        If return_gaps=True: List of (switch_idx, gap_before, gap_after) tuples
+    """
+    switches = detect_regime_switches(d_argmax)
+
+    if len(switches) == 0:
+        return [] if return_gaps else np.array([], dtype=int)
+
+    isolated = []
+
+    for i, switch_idx in enumerate(switches):
+        # Calculate gap before
+        if i == 0:
+            gap_before = switch_idx  # Distance from start
+        else:
+            gap_before = switch_idx - switches[i - 1]
+
+        # Calculate gap after
+        if i == len(switches) - 1:
+            gap_after = len(d_argmax) - switch_idx  # Distance to end
+        else:
+            gap_after = switches[i + 1] - switch_idx
+
+        # Check if isolated
+        if gap_before >= min_gap and gap_after >= min_gap:
+            if return_gaps:
+                isolated.append((i, switch_idx, gap_before, gap_after))
+            else:
+                isolated.append(i)
+
+    if return_gaps:
+        return isolated
+    else:
+        return np.array(isolated, dtype=int)
+
+
+def analyze_switch_spacing(d_argmax: np.ndarray, print_summary: bool = True):
+    """
+    Analyze the spacing between regime switches.
+
+    Parameters
+    ----------
+    d_argmax : np.ndarray
+        Regime indicators
+    print_summary : bool
+        If True, print summary statistics
+
+    Returns
+    -------
+    stats : dict
+        Dictionary with statistics:
+        - 'n_switches': Total number of switches
+        - 'gaps': Array of gap sizes between consecutive switches
+        - 'mean_gap': Mean gap size
+        - 'median_gap': Median gap size
+        - 'min_gap': Minimum gap size
+        - 'max_gap': Maximum gap size
+        - 'isolated_switches': Indices of isolated switches (gap >= 20)
+    """
+    switches = detect_regime_switches(d_argmax)
+
+    if len(switches) < 2:
+        if print_summary:
+            print(f"Only {len(switches)} switch found, cannot compute gaps")
+        return {
+            'n_switches': len(switches),
+            'gaps': np.array([]),
+            'mean_gap': np.nan,
+            'median_gap': np.nan,
+            'min_gap': np.nan,
+            'max_gap': np.nan,
+            'isolated_switches': []
+        }
+
+    # Compute gaps between consecutive switches
+    gaps = np.diff(switches)
+
+    # Find isolated switches
+    isolated = find_isolated_switches(d_argmax, min_gap=20, return_gaps=True)
+
+    stats = {
+        'n_switches': len(switches),
+        'gaps': gaps,
+        'mean_gap': np.mean(gaps),
+        'median_gap': np.median(gaps),
+        'min_gap': np.min(gaps),
+        'max_gap': np.max(gaps),
+        'isolated_switches': isolated
+    }
+
+    if print_summary:
+        print(f"\n{'='*80}")
+        print(f"REGIME SWITCH SPACING ANALYSIS")
+        print(f"{'='*80}")
+        print(f"Total switches: {len(switches)}")
+        print(f"Switch positions: {switches[:10]}..." if len(switches) > 10 else f"Switch positions: {switches}")
+        print(f"\nGap statistics (distance between consecutive switches):")
+        print(f"  Mean gap: {stats['mean_gap']:.1f}")
+        print(f"  Median gap: {stats['median_gap']:.1f}")
+        print(f"  Min gap: {stats['min_gap']}")
+        print(f"  Max gap: {stats['max_gap']}")
+        print(f"\nGap distribution:")
+        print(f"  Gaps < 10: {np.sum(gaps < 10)} ({100*np.sum(gaps < 10)/len(gaps):.1f}%)")
+        print(f"  Gaps 10-20: {np.sum((gaps >= 10) & (gaps < 20))} ({100*np.sum((gaps >= 10) & (gaps < 20))/len(gaps):.1f}%)")
+        print(f"  Gaps >= 20: {np.sum(gaps >= 20)} ({100*np.sum(gaps >= 20)/len(gaps):.1f}%)")
+        print(f"\nIsolated switches (gap >= 20 on both sides): {len(isolated)}")
+        if len(isolated) > 0:
+            print(f"  Best isolated switches for single-switch analysis:")
+            # Sort by minimum gap (most isolated)
+            sorted_isolated = sorted(isolated, key=lambda x: min(x[2], x[3]), reverse=True)
+            for i, (switch_num, switch_pos, gap_before, gap_after) in enumerate(sorted_isolated[:5]):
+                print(f"    Switch #{switch_num} at t={switch_pos}: gap_before={gap_before}, gap_after={gap_after}")
+        print(f"{'='*80}\n")
+
+    return stats
 
 
 def align_to_switches(
@@ -364,7 +520,7 @@ def plot_agaci_weights_at_switches(
 
         ax.set_xlabel('Time relative to switch (t)', fontsize=11)
         ax.set_ylabel('Weight', fontsize=11)
-        ax.set_title(f'γ = {gamma}', fontsize=12, fontweight='bold')
+        ax.set_title(f'γ = {gamma[0]}', fontsize=12, fontweight='bold')
         ax.grid(True, alpha=0.3)
 
         # Apply standardized y-limits if requested
@@ -390,6 +546,171 @@ def plot_agaci_weights_at_switches(
         plt.show()
 
 
+def plot_coverage_at_single_switch(
+    intervals_dict: dict,
+    y_true: np.ndarray,
+    d_argmax: np.ndarray,
+    switch_index: int = 0,
+    window_before: int = 10,
+    window_after: int = 50,
+    save_path: Optional[str] = None,
+    show_error_bars: bool = False,
+    enforce_single_switch: bool = True
+):
+    """
+    Plot coverage around a SINGLE regime switch for different methods.
+
+    This function ensures only ONE switch is visible in the window by either:
+    1. Cutting the trajectory when the next switch occurs (enforce_single_switch=True)
+    2. Selecting a switch that has enough space before the next one
+
+    Parameters
+    ----------
+    intervals_dict : dict
+        Dictionary with keys as method names and values as (lower_bounds, upper_bounds)
+    y_true : np.ndarray, shape (T,)
+        Ground truth values
+    d_argmax : np.ndarray, shape (T,)
+        Regime indicators
+    switch_index : int
+        Which switch to plot (0 = first switch, 1 = second switch, etc.)
+        Default: 0 (first switch)
+    window_before : int
+        Number of steps before switch to show
+    window_after : int
+        Number of steps after switch to show
+    save_path : str, optional
+        Path to save figure
+    show_error_bars : bool
+        Not used for single switch (kept for API consistency)
+    enforce_single_switch : bool
+        If True, truncate window_after to ensure no other switch appears in the plot
+        Default: True
+    """
+    switches = detect_regime_switches(d_argmax)
+
+    if len(switches) == 0:
+        print("No regime switches detected")
+        return
+
+    if switch_index >= len(switches):
+        print(f"Error: switch_index={switch_index} but only {len(switches)} switches found")
+        return
+
+    # Select the specific switch
+    switch_idx = switches[switch_index]
+    print(f"\n[SINGLE SWITCH PLOT] Plotting switch #{switch_index} at position t={switch_idx}")
+
+    # Determine effective window_after (cut at next switch if needed)
+    if enforce_single_switch and switch_index < len(switches) - 1:
+        next_switch = switches[switch_index + 1]
+        time_to_next = next_switch - switch_idx
+        effective_window_after = min(window_after, time_to_next - 1)
+        if effective_window_after < window_after:
+            print(f"[SINGLE SWITCH PLOT] Next switch is at t={next_switch} (distance={time_to_next})")
+            print(f"[SINGLE SWITCH PLOT] Truncating window_after from {window_after} to {effective_window_after}")
+    else:
+        effective_window_after = window_after
+
+    # Check if we have enough data
+    start_idx = switch_idx - window_before
+    end_idx = switch_idx + effective_window_after + 1
+
+    if start_idx < 0:
+        print(f"Warning: Not enough data before switch (need {window_before}, have {switch_idx})")
+        start_idx = 0
+        window_before = switch_idx
+
+    if end_idx > len(d_argmax):
+        print(f"Warning: Not enough data after switch (need {effective_window_after}, have {len(d_argmax) - switch_idx})")
+        end_idx = len(d_argmax)
+        effective_window_after = end_idx - switch_idx - 1
+
+    print(f"[SINGLE SWITCH PLOT] Window: [{start_idx}, {end_idx}), length={end_idx - start_idx}")
+    print(f"[SINGLE SWITCH PLOT] Relative time: [{-window_before}, {effective_window_after}]")
+
+    plt.figure(figsize=(10, 6))
+
+    # Define colors
+    base_colors = {'DS3M': 'C4', 'Naive': 'C0', 'ACI': 'C2', 'AgACI': 'C3'}
+
+    # Separate AgACI methods and assign colors
+    agaci_methods = {k: v for k, v in intervals_dict.items() if 'AgACI' in k and k != 'AgACI'}
+    if agaci_methods:
+        agaci_cmap = plt.cm.viridis(np.linspace(0.2, 0.9, len(agaci_methods)))
+        agaci_colors = {name: agaci_cmap[i] for i, name in enumerate(agaci_methods.keys())}
+    else:
+        agaci_colors = {}
+
+    colors = {**base_colors, **agaci_colors}
+
+    # Plot coverage for each method
+    for method_name, (lower, upper) in intervals_dict.items():
+        # Extract segment
+        lower_seg = lower[start_idx:end_idx]
+        upper_seg = upper[start_idx:end_idx]
+        y_true_seg = y_true[start_idx:end_idx]
+
+        # Compute coverage
+        covered = (y_true_seg >= lower_seg) & (y_true_seg <= upper_seg)
+        valid_mask = ~np.isnan(lower_seg) & ~np.isnan(upper_seg)
+
+        coverage = covered.astype(float)
+        coverage[~valid_mask] = np.nan
+
+        # Create time axis
+        time_axis = np.arange(-window_before, -window_before + len(coverage))
+
+        color = colors.get(method_name, None)
+
+        # Line styles
+        if 'Naive' in method_name:
+            linestyle = ':'
+            linewidth = 3
+        elif 'ACI' in method_name and 'AgACI' not in method_name:
+            linestyle = '--'
+            linewidth = 2.5
+        else:
+            linestyle = '-'
+            linewidth = 2
+
+        plt.plot(time_axis, coverage, label=method_name,
+                linewidth=linewidth, color=color, linestyle=linestyle,
+                marker='o', markersize=4, alpha=0.8)
+
+    # Mark switch point
+    plt.axvline(0, color='r', linestyle='--', linewidth=2, label='Regime switch')
+
+    # Add shaded region to show the regime
+    regime_before = d_argmax[max(0, switch_idx - 1)]
+    regime_after = d_argmax[min(len(d_argmax) - 1, switch_idx)]
+    plt.axvspan(-window_before, 0, alpha=0.1, color='blue',
+                label=f'Regime {int(regime_before)}')
+    plt.axvspan(0, effective_window_after, alpha=0.1, color='orange',
+                label=f'Regime {int(regime_after)}')
+
+    plt.xlabel('Time relative to switch', fontsize=12)
+    plt.ylabel('Coverage rate', fontsize=12)
+    plt.title(f'Coverage dynamics around regime switch #{switch_index}\n'
+              f'Single switch at t={switch_idx} (no other switches in window)',
+              fontsize=13, fontweight='bold')
+    plt.legend(loc='best', fontsize=9)
+    plt.grid(True, alpha=0.3)
+    plt.ylim([-0.05, 1.05])
+
+    # Add horizontal target line
+    plt.axhline(0.9, color='green', linestyle=':', linewidth=1.5,
+                alpha=0.5, label='Target: 90%')
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved: {save_path}")
+        plt.close()
+    else:
+        plt.show()
+
+
 def plot_coverage_at_switches(
     intervals_dict: dict,
     y_true: np.ndarray,
@@ -402,7 +723,7 @@ def plot_coverage_at_switches(
     cut_at_next_switch: bool = True
 ):
     """
-    Plot coverage around regime switches for different methods.
+    Plot coverage around regime switches for different methods (AVERAGED over all switches).
 
     Parameters
     ----------
@@ -1653,7 +1974,7 @@ def plot_length_at_switches(
         if window_before is None:
             window_before = 10
         if window_after is None:
-            window_after = 50
+            window_after = 10
 
     if len(switches) == 0:
         print("No regime switches detected")
