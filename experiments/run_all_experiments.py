@@ -29,7 +29,7 @@ print(f"[INFO] PROJ={PROJ}")
 print("[INFO] Importing acp_utils...")
 from experiments.utils.acp_utils import aci_intervals, agaci_intervals
 print("[INFO] Importing ds3m_utils...")
-from experiments.utils.ds3m_utils import ds3m_to_tabular_all, forecast, load_ds3m_data, load_ds3m_model, get_full_d_argmax
+from experiments.utils.ds3m_utils import forecast, load_ds3m_data, load_ds3m_model, get_full_d_argmax
 print("[INFO] Importing plot_utils...")
 from experiments.utils.plot_utils import plot_results_with_aci
 print("[INFO] Importing regime_switch_analysis...")
@@ -402,7 +402,15 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--csv", default="paper_results.csv")
     ap.add_argument("--save-dir", default="figures", help="Directory to save plots (use local path to avoid OneDrive sync issues)")
+    ap.add_argument("--data-dir", type=str, default=None,
+                    help="Custom data directory (e.g., 'Deep_Switching_State_Space_Model/data/Toy_exp2_V1_0.5_V2_1.0')")
     args = ap.parse_args()
+
+    # Determine dataset identifier from data_dir if provided
+    if hasattr(args, 'data_dir') and args.data_dir is not None:
+        dataset_id = os.path.basename(args.data_dir)
+    else:
+        dataset_id = args.problem
 
     # device
     device = pick_device(args.device)
@@ -498,7 +506,7 @@ def main():
                 print(f"  d_dim: {d_dim}")
 
             plot_results_with_aci(
-                dataname=args.problem,
+                dataname=dataset_id,
                 testOriginal=y_true_full,
                 testForecast_mean=y_pred_full,
                 d_dim=d_dim,
@@ -526,7 +534,7 @@ def main():
     print("="*60)
 
     if d_argmax_full is not None and len(d_argmax_full) > 0:
-        regime_save_dir = f"figures/regime_analysis/{args.problem}"
+        regime_save_dir = f"figures/regime_analysis/{dataset_id}"
         os.makedirs(regime_save_dir, exist_ok=True)
 
         # 1. Plot regime heatmap for full dataset

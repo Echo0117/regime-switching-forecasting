@@ -104,7 +104,7 @@
 
 #         return res_dict
     
-#     def predict(self, X, y, args, *, test_offset: int | None = None):
+#     def predict(self, X, y, args, *, test_offset = None):
 #         """
 #         Return a vector of length len(X). If test_offset is provided, slice the
 #         precomputed DS³M test-horizon forecast starting at that offset.
@@ -310,7 +310,7 @@ class DS3MWrapper:
         self._cursor += 1
         return out
 
-    def predict(self, X, y, args, *, test_offset: int | None = None):
+    def predict(self, X, y, args, *, test_offset = None):
         """
         兼容旧接口：
           - 若给了 test_offset，则从该位置切 length=len(X) 的一段返回；

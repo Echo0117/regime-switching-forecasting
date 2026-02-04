@@ -89,8 +89,16 @@ def plot_results_with_aci(
 
     # ------------------ DS³M intervals ------------------
     if dsm_lower is not None and dsm_upper is not None:
-        dsm_lower = _ensure_2d(dsm_lower)[:, target_dim]
-        dsm_upper = _ensure_2d(dsm_upper)[:, target_dim]
+        dsm_lower = _ensure_2d(dsm_lower)
+        dsm_upper = _ensure_2d(dsm_upper)
+        # If already extracted for target dimension (shape: (T, 1)), squeeze it
+        # Otherwise, extract the target dimension
+        if dsm_lower.shape[1] == 1:
+            dsm_lower = dsm_lower[:, 0]
+            dsm_upper = dsm_upper[:, 0]
+        else:
+            dsm_lower = dsm_lower[:, target_dim]
+            dsm_upper = dsm_upper[:, target_dim]
         L = min(len(dsm_lower), T)
         plt.fill_between(tt[-L:], dsm_lower[-L:], dsm_upper[-L:], color="gray", alpha=0.25, label="DS³M MC interval")
 
@@ -248,145 +256,3 @@ def plot_results_with_aci(
         except Exception as e:
             print(f"[WARN] Plot regime heatmap failed: {e}")
 
-
-def plot_regime_comparison(
-    y_true,
-    y_pred,
-    y_lower,
-    y_upper,
-    d_true,
-    d_pred,
-    test_start,
-    save_path=None
-):
-    """
-    Plot comparing true vs predicted regimes with forecast intervals.
-    
-    Parameters
-    ----------
-    y_true : np.ndarray, shape (N,)
-        True observations
-    y_pred : np.ndarray, shape (test_len,)
-        Predicted observations (test set only)
-    y_lower, y_upper : np.ndarray, shape (test_len,)
-        Prediction intervals (test set only)
-    d_true : np.ndarray, shape (N,)
-        True regime labels (full dataset)
-    d_pred : np.ndarray, shape (N,)
-        Predicted regime labels (full dataset)
-    test_start : int
-        Index where test set starts
-    save_path : str, optional
-        Path to save the figure
-    """
-    fig, axes = plt.subplots(3, 1, figsize=(14, 10))
-    
-    N_full = len(d_true)
-    time_full = np.arange(N_full)
-    test_len = len(y_pred)
-    time_test = np.arange(test_start, test_start + test_len)
-    
-    # === Top plot: True observations with true regimes ===
-    ax = axes[0]
-    
-    # Color by true regime
-    for regime_id in np.unique(d_true):
-        mask = (d_true == regime_id)
-        ax.scatter(time_full[mask], y_true[mask],
-                  c=f'C{regime_id}', s=10, alpha=0.5,
-                  label=f'Regime {regime_id} (True)')
-    
-    # Mark true regime switches
-    true_switches = np.where(np.diff(d_true) != 0)[0] + 1
-    for sw in true_switches:
-        ax.axvline(sw, color='red', linestyle='--', alpha=0.3, linewidth=1)
-    
-    ax.axvline(test_start, color='black', linestyle=':', linewidth=2, label='Train/Test split')
-    ax.set_xlabel('Time', fontsize=11)
-    ax.set_ylabel('Observation', fontsize=11)
-    ax.set_title('True Observations with True Regime Labels', fontsize=13, fontweight='bold')
-    ax.legend(loc='upper right', fontsize=9)
-    ax.grid(True, alpha=0.3)
-    
-    # === Middle plot: Model predictions with predicted regimes ===
-    ax = axes[1]
-    
-    # Color full dataset by predicted regime
-    for regime_id in np.unique(d_pred):
-        mask = (d_pred == regime_id)
-        ax.scatter(time_full[mask], y_true[mask],
-                  c=f'C{regime_id}', s=10, alpha=0.3,
-                  label=f'Regime {regime_id} (Predicted)')
-    
-    # Plot test set predictions with intervals
-    ax.plot(time_test, y_pred, 'g-', linewidth=2, label='Prediction', zorder=10)
-    ax.fill_between(time_test, y_lower, y_upper,
-                    color='green', alpha=0.2, label='90% PI')
-    
-    # Mark predicted regime switches
-    pred_switches = np.where(np.diff(d_pred) != 0)[0] + 1
-    for sw in pred_switches:
-        ax.axvline(sw, color='blue', linestyle='--', alpha=0.3, linewidth=1)
-    
-    ax.axvline(test_start, color='black', linestyle=':', linewidth=2, label='Train/Test split')
-    ax.set_xlabel('Time', fontsize=11)
-    ax.set_ylabel('Observation', fontsize=11)
-    ax.set_title('Model Predictions with Predicted Regime Labels', fontsize=13, fontweight='bold')
-    ax.legend(loc='upper right', fontsize=9)
-    ax.grid(True, alpha=0.3)
-    
-    # === Bottom plot: Regime comparison (test set only) ===
-    ax = axes[2]
-    
-    d_true_test = d_true[test_start:test_start + test_len]
-    d_pred_test = d_pred[test_start:test_start + test_len]
-    time_test_rel = np.arange(test_len)
-    
-    # Plot both as lines
-    ax.plot(time_test_rel, d_true_test, 'r-', linewidth=2, label='True regime', alpha=0.7)
-    ax.plot(time_test_rel, d_pred_test, 'b--', linewidth=2, label='Predicted regime', alpha=0.7)
-    
-    # Shade disagreement regions
-    disagree_mask = (d_true_test != d_pred_test)
-    if np.any(disagree_mask):
-        ax.fill_between(time_test_rel, 0, np.max(d_true_test) + 0.5,
-                       where=disagree_mask, color='yellow', alpha=0.3,
-                       label='Disagreement')
-    
-    # Mark switches
-    true_switches_test = np.where(np.diff(d_true_test) != 0)[0] + 1
-    pred_switches_test = np.where(np.diff(d_pred_test) != 0)[0] + 1
-    
-    for sw in true_switches_test:
-        ax.axvline(sw, color='red', linestyle='--', alpha=0.5, linewidth=1.5)
-    for sw in pred_switches_test:
-        ax.axvline(sw, color='blue', linestyle=':', alpha=0.5, linewidth=1.5)
-    
-    # Calculate accuracy
-    accuracy = np.mean(d_true_test == d_pred_test) * 100
-    
-    ax.set_xlabel('Time (relative to test start)', fontsize=11)
-    ax.set_ylabel('Regime ID', fontsize=11)
-    ax.set_title(f'Regime Comparison (Test Set) - Accuracy: {accuracy:.1f}%', 
-                fontsize=13, fontweight='bold')
-    ax.legend(loc='upper right', fontsize=9)
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim([-0.5, np.max([d_true_test.max(), d_pred_test.max()]) + 0.5])
-    
-    plt.tight_layout()
-    
-    if save_path:
-        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Saved regime comparison plot to: {save_path}")
-        plt.close()
-    else:
-        plt.show()
-    
-    # Print statistics
-    print(f"\n=== Regime Comparison Statistics ===")
-    print(f"True switches (full dataset): {len(np.where(np.diff(d_true) != 0)[0])}")
-    print(f"Predicted switches (full dataset): {len(np.where(np.diff(d_pred) != 0)[0])}")
-    print(f"True switches (test set): {len(true_switches_test)}")
-    print(f"Predicted switches (test set): {len(pred_switches_test)}")
-    print(f"Regime accuracy (test set): {accuracy:.2f}%")

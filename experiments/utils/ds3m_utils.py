@@ -56,7 +56,21 @@ def load_ds3m_data(args):
     print(dataname)
     retry = 1
 
-    if dataname == "Toy":
+    # Determine data directory and dataset identifier
+    if hasattr(args, 'data_dir') and args.data_dir is not None:
+        # Custom data directory (e.g., Deep_Switching_State_Space_Model/data/Toy_exp2_V1_0.5_V2_1.0)
+        data_dir = args.data_dir
+        # Extract dataset identifier from directory name
+        dataset_id = os.path.basename(data_dir)
+    else:
+        # Default data directory
+        data_dir = f"Deep_Switching_State_Space_Model/data/{dataname}"
+        dataset_id = dataname
+
+    print(f"Data directory: {data_dir}")
+    print(f"Dataset ID: {dataset_id}")
+
+    if dataname == "Toy" or dataset_id.startswith('Toy'):
 
         freq = 1
         test_len = 500
@@ -74,10 +88,10 @@ def load_ds3m_data(args):
         batch_size = 64  # Batch size
         n_epochs = 100  # Number of epochs for training
 
-        RawDataOriginal = pd.read_csv(
-            "Deep_Switching_State_Space_Model/data/Toy/simulation_data_nonlinear_y.csv",
-            header=None,
-        ).values
+        data_path = f"{data_dir}/simulation_data_nonlinear_y.csv"
+        print(f"Loading data from: {data_path}")
+
+        RawDataOriginal = pd.read_csv(data_path, header=None).values
         RawDataOriginal = RawDataOriginal.reshape(-1, 1, 1)
 
     # %%
@@ -111,6 +125,9 @@ def load_ds3m_data(args):
         z_true = z_true[:, 2000:5000]
         data_st = np.array(data_st_all["data"])
         data_st = data_st[:, 2000:5000]
+        # Set seed for reproducible noise
+        np.random.seed(0)
+        torch.manual_seed(0)
         data_st = data_st + data_st[0].std(axis=0) * 0.001 * np.random.randn(
             data_st.shape[1], 10
         )  # added noise
@@ -296,6 +313,35 @@ def load_ds3m_data(args):
         RawDataOriginal = RawDataOriginal.reshape(-1, 1, predict_dim)
 
     # %%
+    if dataname == "Pernod":
+
+        freq = 1
+        timestep = 4  # Weekly data, use 4 weeks lookback
+        predict_dim = 1  # Univariate: volume_so only
+        test_len = 260  # ~5 years of weekly data for testing
+        DataPath = "Deep_Switching_State_Space_Model/data/Pernod/pernod.csv"
+
+        # These match the trained model checkpoint
+        x_dim = 1  # Dimension of x (must match rnn_forward input)
+        y_dim = 1  # Dimension of y (same as x_dim for autoregressive)
+        h_dim = 50  # Dimension of the hidden states in RNN
+        z_dim = 10  # Dimension of the latent variable z
+        d_dim = 2  # Dimension of the latent variable d
+        n_layers = 1  # Number of the layers of the RNN
+        clip = 10  # Gradient clips
+        learning_rate = 1e-3  # Learning rate
+        batch_size = 64  # Batch size
+        n_epochs = 100  # Number of epochs for training
+
+        df = pd.read_csv(DataPath, delimiter=';')
+        feature_cols = ['volume_so']
+        RawDataOriginal = df[feature_cols].values
+        # Handle missing values (replace with 0)
+        RawDataOriginal = np.nan_to_num(RawDataOriginal, nan=0.0)
+        RawDataOriginal = RawDataOriginal.reshape(-1, 1, predict_dim)
+        pernod_target_dim = 0
+
+    # %%
     if remove_mean:
         means = np.expand_dims(
             np.mean(RawDataOriginal[: -int(test_len / freq), :, :], axis=0), axis=0
@@ -307,50 +353,96 @@ def load_ds3m_data(args):
     RawData = RawData.reshape(-1, RawData.shape[2])
     data = RawData
 
+    # For most datasets, X and Y are the same (autoregressive)
+    data_X = data
+    data_Y = data
+    separate_XY = False
+
     if remove_residual:
         trend = data[0:-1, :]
         data = data[1:, :] - trend
+        if separate_XY:
+            trend_X = data_X[0:-1, :]
+            data_X = data_X[1:, :] - trend_X
+            trend_Y = data_Y[0:-1, :]
+            data_Y = data_Y[1:, :] - trend_Y
 
     # Split into train and test data
     if dataname == "Unemployment":
         length = len(data) - test_len
         train_len = int(length)
-        train_data = data[:train_len]
-        valid_data = data[:train_len]
-        test_data = data[(-test_len - timestep - 1) : -1]
+        train_data_X = data_X[:train_len]
+        valid_data_X = data_X[:train_len]
+        test_data_X = data_X[-test_len - timestep :]
+        train_data_Y = data_Y[:train_len]
+        valid_data_Y = data_Y[:train_len]
+        test_data_Y = data_Y[-test_len - timestep :]
 
     elif dataname == "Lorenz":
         train_len = 1000 + timestep
         valid_len = len(data) - train_len - test_len
-        train_data = data[:train_len]
-        valid_data = data[(train_len) : (train_len + valid_len)]
-        test_data = data[(-test_len - timestep - 1) : -1]
+        train_data_X = data_X[:train_len]
+        valid_data_X = data_X[(train_len) : (train_len + valid_len)]
+        test_data_X = data_X[-test_len - timestep :]
+        train_data_Y = data_Y[:train_len]
+        valid_data_Y = data_Y[(train_len) : (train_len + valid_len)]
+        test_data_Y = data_Y[-test_len - timestep :]
 
     elif dataname == "Sleep":
         train_len = 1000
-        train_data = data[:train_len]
-        valid_data = data[:train_len]
-        test_data = data[-test_len - timestep :]
+        train_data_X = data_X[:train_len]
+        valid_data_X = data_X[:train_len]
+        test_data_X = data_X[-test_len - timestep :]
+        train_data_Y = data_Y[:train_len]
+        valid_data_Y = data_Y[:train_len]
+        test_data_Y = data_Y[-test_len - timestep :]
     else:
         length = len(data) - test_len
         train_len = int(length * 0.75)
         valid_len = int(length * 0.25)
 
-        train_data = data[:train_len]
-        valid_data = data[(train_len) : (train_len + valid_len)]
-        test_data = data[(-test_len - timestep - 1) : -1]
+        train_data_X = data_X[:train_len]
+        valid_data_X = data_X[(train_len) : (train_len + valid_len)]
+        test_data_X = data_X[-test_len - timestep :]
+        train_data_Y = data_Y[:train_len]
+        valid_data_Y = data_Y[(train_len) : (train_len + valid_len)]
+        test_data_Y = data_Y[-test_len - timestep :]
 
     # %%
     # Normalize the dataset
-    moments = normalize_moments(train_data)
-    train_data = normalize_fit(train_data, moments)
-    valid_data = normalize_fit(valid_data, moments)
-    test_data = normalize_fit(test_data, moments)
+    # For Pernod, normalize X and Y separately since they have different dimensions
+    if separate_XY:
+        moments_X = normalize_moments(train_data_X)
+        train_data_X = normalize_fit(train_data_X, moments_X)
+        valid_data_X = normalize_fit(valid_data_X, moments_X)
+        test_data_X = normalize_fit(test_data_X, moments_X)
+
+        moments_Y = normalize_moments(train_data_Y)
+        train_data_Y = normalize_fit(train_data_Y, moments_Y)
+        valid_data_Y = normalize_fit(valid_data_Y, moments_Y)
+        test_data_Y = normalize_fit(test_data_Y, moments_Y)
+        moments = moments_X  # Use X moments for compatibility
+    else:
+        moments = normalize_moments(train_data_X)
+        train_data_X = normalize_fit(train_data_X, moments)
+        valid_data_X = normalize_fit(valid_data_X, moments)
+        test_data_X = normalize_fit(test_data_X, moments)
+        train_data_Y = train_data_X
+        valid_data_Y = valid_data_X
+        test_data_Y = test_data_X
 
     # Create training and test dataset
-    trainX, trainY = create_dataset2(train_data, timestep)
-    validX, validY = create_dataset2(valid_data, timestep)
-    testX, testY = create_dataset2(test_data, timestep)
+    if separate_XY:
+        trainX, _ = create_dataset2(train_data_X, timestep)
+        _, trainY = create_dataset2(train_data_Y, timestep)
+        validX, _ = create_dataset2(valid_data_X, timestep)
+        _, validY = create_dataset2(valid_data_Y, timestep)
+        testX, _ = create_dataset2(test_data_X, timestep)
+        _, testY = create_dataset2(test_data_Y, timestep)
+    else:
+        trainX, trainY = create_dataset2(train_data_X, timestep)
+        validX, validY = create_dataset2(valid_data_X, timestep)
+        testX, testY = create_dataset2(test_data_X, timestep)
 
     trainX = np.transpose(trainX, (1, 0, 2))
     validX = np.transpose(validX, (1, 0, 2))
@@ -370,8 +462,9 @@ def load_ds3m_data(args):
     testY = torch.from_numpy(testY).float()
 
     # %%
+    # Use dataset_id for checkpoint directory (includes exp2 info if present)
     directoryBest = os.path.join(
-        "Deep_Switching_State_Space_Model", "results", "checkpoints", dataname
+        "Deep_Switching_State_Space_Model", "results", "checkpoints", dataset_id
     )
     figdirectory = os.path.join("figures")
     if not os.path.exists(directoryBest):
@@ -393,6 +486,8 @@ def load_ds3m_data(args):
     # Set target_dim based on the dataset - default to 0 for single-dim, or predict_dim-1 for multi-dim
     # For Electricity with 48 dimensions, this would be 47
     target_dim = predict_dim - 1 if predict_dim > 1 else 0
+    if dataname == "Pernod":
+        target_dim = pernod_target_dim
 
     return {
         "trainX": trainX,
@@ -485,12 +580,17 @@ def forecast(
             means[0, :, :], (int(test_len / freq), 1)
         )
     elif remove_residual:
-        testForecast_mean = np.mean(all_testForecast, axis=1) + trend[-test_len:, :]
+        # IMPORTANT: residualization is r_t = y_t - y_{t-1}.
+        # For the last `test_len` residual targets, the matching "trend" terms are y_{t-1},
+        # i.e. one step *before* the corresponding y_t. Using trend[-test_len:] shifts by +1.
+        # trend was created as data[0:-1], so take [-test_len-1:-1] to align.
+        trend_tail = trend[-test_len-1:-1, :]
+        testForecast_mean = np.mean(all_testForecast, axis=1) + trend_tail
         testForecast_uq = (
-            np.quantile(all_testForecast, 0.95, axis=1) + trend[-test_len:, :]
+            np.quantile(all_testForecast, 0.95, axis=1) + trend_tail
         )
         testForecast_lq = (
-            np.quantile(all_testForecast, 0.05, axis=1) + trend[-test_len:, :]
+            np.quantile(all_testForecast, 0.05, axis=1) + trend_tail
         )
     else:
         testForecast_mean = np.mean(all_testForecast, axis=1)
@@ -514,36 +614,6 @@ def forecast(
         testForecast_uq,
         testForecast_lq,
     )
-
-def _to_np(x):
-    return x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
-
-def ds3m_to_tabular_split(ds, split="train", target_dim=0):
-    """
-    Convert DS3M tensors (L, N, D) -> ACI tabular:
-      X: (N, L*D), y: (N,)
-    Target = next step value at the end of the window: Y[-1, :, target_dim]
-    """
-    X3 = _to_np(ds[f"{split}X"])  # (L, N, D)
-    Y3 = _to_np(ds[f"{split}Y"])  # (L, N, D)
-    L, N, D = X3.shape
-    X2 = X3.transpose(1, 0, 2).reshape(N, L * D)         # (N, L*D)
-    y  = Y3[-1, :, target_dim].reshape(-1)               # (N,)
-    return X2, y
-
-def ds3m_to_tabular_all(ds, target_dim=0):
-    """
-    Concatenate train+valid+test along N, then flatten each window.
-    Use this if you want ACI to run on the entire timeline prepared by DS3M.
-    """
-    X3 = torch.cat([ds["trainX"], ds["validX"], ds["testX"]], dim=1)  # (L, N_total, D)
-    Y3 = torch.cat([ds["trainY"], ds["validY"], ds["testY"]], dim=1)  # (L, N_total, D)
-    X3 = _to_np(X3); Y3 = _to_np(Y3)
-    L, N_total, D = X3.shape
-    X2 = X3.transpose(1, 0, 2).reshape(N_total, L * D)   # (N_total, L*D)
-    y  = Y3[-1, :, target_dim].reshape(-1)               # (N_total,)
-    return X2, y
-
 
 def get_full_d_argmax(model, ds, forecaststep=1, MC_S=200):
     """
@@ -584,112 +654,6 @@ def get_full_d_argmax(model, ds, forecaststep=1, MC_S=200):
     d_argmax_full = np.argmax(np.array(forecast_d_MC_argmax), axis=0).reshape(-1)
 
     return d_argmax_full
-
-
-def retrain_ds3m_model(
-    ds,
-    n_epochs: int = 80,
-    batch_size: int = 64,
-    verbose: bool = False,
-    init_model=None,
-):
-    """
-    Retrain a DS3M model on the dataset described by ``ds``.
-
-    Parameters
-    ----------
-    ds : dict
-        Dataset dictionary produced by ``load_ds3m_data`` (after any mutations).
-    n_epochs : int
-        Maximum number of epochs to train for.
-    batch_size : int
-        Batch size used in the DS3M training loop.
-    verbose : bool
-        Whether to print progress updates.
-
-    init_model : DSSSM, optional
-        If provided, training will start from this pretrained model instead of
-        reinitialising random weights.
-
-    Returns
-    -------
-    model : DSSSM
-        The retrained DS3M model ready for forecasting.
-    """
-    device = ds["device"]
-    def _build_model():
-        return DSSSM(
-            ds["x_dim"],
-            ds["y_dim"],
-            ds["h_dim"],
-            ds["z_dim"],
-            ds["d_dim"],
-            ds["n_layers"],
-            device,
-            ds.get("bidirection", False),
-        ).to(device)
-
-    if init_model is None:
-        model = _build_model()
-    else:
-        # Warm-start from the provided checkpoint so the model only needs a light fine-tune
-        model = _build_model()
-        model.load_state_dict(copy.deepcopy(init_model.state_dict()))
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=ds["learning_rate"])
-    scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.1, patience=15)
-    # Increase patience for early stopping to allow more training
-    early_stopping = EarlyStopping(patience=50, verbose=False)
-
-    def _loss_to_float(loss_component):
-        if hasattr(loss_component, "item"):
-            return float(loss_component.item())
-        return float(loss_component)
-
-    best_loss = float("inf")
-    best_state = None
-    best_epoch = 0
-    last_epoch = 0
-
-    for epoch in range(1, n_epochs + 1):
-        train_outputs = train(
-            model,
-            optimizer,
-            ds["trainX"],
-            ds["trainY"],
-            epoch,
-            batch_size,
-            n_epochs,
-        )
-        # train returns (d_samples, z_samples, loss, d_post, z_post)
-        loss_value = _loss_to_float(train_outputs[2])
-        if loss_value < best_loss:
-            best_loss = loss_value
-            best_state = copy.deepcopy(model.state_dict())
-            best_epoch = epoch
-        scheduler.step(loss_value)
-        early_stopping(loss_value, model)
-        last_epoch = epoch
-
-        if verbose and epoch % 20 == 0:
-            print(f"    Epoch {epoch}/{n_epochs} | loss={loss_value:.4f}")
-
-        if early_stopping.early_stop:
-            if verbose:
-                print(f"    Early stopping triggered at epoch {epoch}")
-            break
-
-    if best_state is not None:
-        model.load_state_dict(best_state)
-
-    if verbose:
-        print(
-            f"    Retraining finished after {last_epoch} epochs "
-            f"(best loss={best_loss:.4f} @ epoch {best_epoch})"
-        )
-
-    model.eval()
-    return model
 
 # %%
 # if restore == False:
@@ -857,597 +821,3 @@ def load_ds3m_model(
     print("Epoch:", epoch)
 
     return model
-
-
-# %%
-
-
-def plot_results(
-    model,
-    testForecast_mean,
-    testOriginal,
-    size,
-    forecast_d_MC_argmax,
-    testForecast_uq,
-    testForecast_lq,
-    RawDataOriginal,
-    d_dim,
-    predict_dim,
-    dataname,
-    figdirectory,
-    device,
-    test_len,
-    z_true=None,
-    trend=None,
-    testX=None,
-    testY=None,
-    data=None,
-    states=None,
-    res=None,
-    moments=None,
-    freq=None,
-    means=None,
-    remove_mean=False,
-    remove_residual=False,
-    forecaststep=1,
-    MC_S=200,
-):
-
-    my_cmap = matplotlib.cm.get_cmap("rainbow")
-    cmap = plt.get_cmap("RdBu", d_dim)
-
-    # %%
-    if dataname == "Toy":
-
-        d_original = pd.read_csv(
-            "Deep_Switching_State_Space_Model/data/Toy/simulation_data_nonlinear_d.csv",
-            header=None,
-        ).values.reshape(-1)[-test_len:]
-        z_original = pd.read_csv(
-            "Deep_Switching_State_Space_Model/data/Toy/simulation_data_nonlinear_z.csv",
-            header=None,
-        ).values.reshape(-1)[-test_len:]
-
-        DSARF = pd.read_csv(
-            "Deep_Switching_State_Space_Model/data/Toy/Toy_s_forecasted_dsarf.csv",
-            header=None,
-        ).values
-        DSARF = np.concatenate((np.array([[1]]), DSARF))
-        SNLDS = pd.read_csv(
-            "Deep_Switching_State_Space_Model/data/Toy/Toy_s_forecasted_snlds.csv",
-            header=None,
-        ).values
-
-        DS3M = forecast_d_MC_argmax  # d(state) value
-        acc = accuracy_score(d_original[-size:], DS3M)
-        if acc < 0.5:
-            DS3M = 1 - DS3M
-        DSARF = DSARF
-        SNLDS = 1 - SNLDS[-size:]
-
-        inferX = (
-            torch.from_numpy(np.expand_dims(data[(-test_len - 1) : -1], axis=0))
-            .float()
-            .to(device)
-        )
-        inferY = (
-            torch.from_numpy(np.expand_dims(data[-test_len:], axis=0))
-            .float()
-            .to(device)
-        )
-        (
-            all_d_t_sampled_plot_test,
-            all_z_t_sampled_test,
-            loss_test,
-            all_d_posterior_test,
-            all_z_posterior_mean_test,
-        ) = test(model, inferX, inferY, 0, "test")
-        d_infer = all_d_t_sampled_plot_test[:, 1, 0]
-        d_infer = d_infer
-
-        xticks_int = 10
-        fig, (ax1, ax4, ax3, ax5, ax6) = plt.subplots(
-            5,
-            1,
-            figsize=(20, 10),
-            sharex=True,
-            gridspec_kw={"height_ratios": [3, 0.5, 0.5, 0.5, 0.5]},
-        )
-
-        ######
-        _ = ax1.plot(
-            np.arange(size * predict_dim) / predict_dim,
-            testOriginal.reshape(-1),
-            label="original $y_t$",
-        )
-        _ = ax1.plot(
-            np.arange(size * predict_dim) / predict_dim,
-            testForecast_mean.reshape(-1),
-            color="red",
-            label="forecasted mean for $y_t$",
-        )
-        _ = ax1.plot(
-            np.arange(size * predict_dim) / predict_dim,
-            testForecast_uq.reshape(-1),
-            color="grey",
-            alpha=0.8,
-        )
-        _ = ax1.plot(
-            np.arange(size * predict_dim) / predict_dim,
-            testForecast_lq.reshape(-1),
-            color="grey",
-            alpha=0.8,
-        )
-        _ = ax1.fill_between(
-            np.arange(size * predict_dim) / predict_dim,
-            testForecast_uq.reshape(-1),
-            testForecast_lq.reshape(-1),
-            color="grey",
-            alpha=0.2,
-            label="90% confidence interval",
-        )
-        _ = ax1.set_xlim(0, size)
-        _ = ax1.legend()
-        _ = ax1.set_title("Prediction for $y_t$")
-
-        ######
-        _ = sns.heatmap(
-            d_original[-size:].reshape(1, -1),
-            linewidth=0,
-            cbar=False,
-            alpha=1,
-            cmap=cmap,
-            vmin=0,
-            vmax=1,
-            ax=ax4,
-        )
-        _ = ax4.set_xticks(np.round(np.arange(0, size, xticks_int)))
-        _ = ax4.set_xticklabels(np.round(np.arange(0, size, xticks_int)))
-        _ = ax4.set_ylabel("True", fontweight="bold", c="red")
-        _ = ax4.set_yticks([])
-
-        ######
-        _ = sns.heatmap(
-            DS3M.reshape(1, -1),
-            linewidth=0,
-            cbar=False,
-            alpha=1,
-            cmap=cmap,
-            vmin=0,
-            vmax=1,
-            ax=ax3,
-        )
-        _ = ax3.set_xticks(np.round(np.arange(0, size, xticks_int)))
-        _ = ax3.set_xticklabels(np.round(np.arange(0, size, xticks_int)))
-        _ = ax3.set_ylabel("DS$^3$M", fontweight="bold")
-        _ = ax3.set_yticks([])
-
-        _ = sns.heatmap(
-            DSARF.reshape(1, -1),
-            linewidth=0,
-            cbar=False,
-            alpha=1,
-            cmap=cmap,
-            vmin=0,
-            vmax=1,
-            ax=ax5,
-        )
-        _ = ax5.set_xticks(np.round(np.arange(0, size, xticks_int)))
-        _ = ax5.set_xticklabels(np.round(np.arange(0, size, xticks_int)))
-        _ = ax5.set_ylabel("DSARF", fontweight="bold")
-        _ = ax5.set_yticks([])
-
-        _ = sns.heatmap(
-            SNLDS.reshape(1, -1),
-            linewidth=0,
-            cbar=False,
-            alpha=1,
-            cmap=cmap,
-            vmin=0,
-            vmax=1,
-            ax=ax6,
-        )
-        _ = ax6.set_xticks(np.round(np.arange(0, size, xticks_int)))
-        _ = ax6.set_xticklabels(np.round(np.arange(0, size, xticks_int)))
-        _ = ax6.set_ylabel("SNLDS", fontweight="bold")
-        _ = ax6.set_yticks([])
-        plt.savefig(figdirectory + "Prediction.png", format="png")
-        plt.show()
-
-        save_results_to_csv(
-            dataname, d_original[-size:], DS3M, d_infer, res, type_val=""
-        )
-
-    # %%
-    if dataname == "Lorenz":
-
-        trainX2 = torch.from_numpy(RawDataOriginal[:1000, :, :]).float().to(device)
-        trainY2 = torch.from_numpy(RawDataOriginal[1:1001, :, :]).float().to(device)
-        (
-            all_d_t_sampled_plot_test,
-            all_z_t_sampled_test,
-            loss_test,
-            all_d_posterior_test,
-            all_z_posterior_mean_test,
-        ) = test(model, trainX2, trainY2, 0, "test")
-        latents = z_true[0, 1:1001, :]
-        categories = all_d_t_sampled_plot_test[:, 1:, :].reshape(-1)
-        colormap = np.array(["r", "b", "g", "y"])
-        from mpl_toolkits.mplot3d import Axes3D
-
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection="3d")
-        ax.scatter(latents[:, 0], latents[:, 1], latents[:, 2], c=colormap[categories])
-        plt.savefig(figdirectory + "Prediction.png", format="png")
-        plt.show()
-
-        testX2 = (
-            torch.from_numpy(RawDataOriginal[(-test_len - 1) : -1, :, :])
-            .float()
-            .to(device)
-        )
-        testY2 = torch.from_numpy(RawDataOriginal[-test_len:, :, :]).float().to(device)
-        (
-            all_d_t_sampled_plot_test,
-            all_z_t_sampled_test,
-            loss_test,
-            all_d_posterior_test,
-            all_z_posterior_mean_test,
-        ) = test(model, testX2, testY2, 0, "test")
-        categories = all_d_t_sampled_plot_test[:, 1:, :].reshape(-1)
-
-        save_results_to_csv(
-            dataname,
-            states.numpy().reshape(-1)[-testX.shape[1] :],
-            forecast_d_MC_argmax,
-            categories,
-            res,
-            type_val="",
-        )
-
-    # %%
-    if dataname == "Sleep":
-
-        xticks_int = 100
-
-        fig, (ax1, ax2) = plt.subplots(
-            2, 1, figsize=(20, 4), sharex=True, gridspec_kw={"height_ratios": [3, 0.5]}
-        )
-        ax1.plot(
-            np.arange(size * predict_dim) / predict_dim,
-            testOriginal.reshape(-1),
-            label="original",
-        )
-        ax1.plot(
-            np.arange(size * predict_dim) / predict_dim,
-            testForecast_mean.reshape(-1),
-            color="red",
-            label="forecasted mean",
-        )
-        ax1.plot(
-            np.arange(size * predict_dim) / predict_dim,
-            testForecast_uq.reshape(-1),
-            color="grey",
-            alpha=0.8,
-        )
-        ax1.plot(
-            np.arange(size * predict_dim) / predict_dim,
-            testForecast_lq.reshape(-1),
-            color="grey",
-            alpha=0.8,
-        )
-        ax1.fill_between(
-            np.arange(size * predict_dim) / predict_dim,
-            testForecast_uq.reshape(-1),
-            testForecast_lq.reshape(-1),
-            color="grey",
-            alpha=0.2,
-        )
-        ax1.legend()
-
-        sns.heatmap(
-            1 - forecast_d_MC_argmax.reshape(1, -1),
-            linewidth=0,
-            cbar=False,
-            alpha=1,
-            cmap=cmap,
-            vmin=0,
-            vmax=1,
-            ax=ax2,
-        )
-        ax2.set_xticks(np.round(np.arange(0, size, xticks_int)))
-        ax2.set_xticklabels(np.round(np.arange(0, size, xticks_int)))
-        ax5 = ax2.twinx()
-
-        plt.savefig(figdirectory + "Prediction.png", format="png")
-        plt.show()
-
-        save_rmse_mape(dataname, res)
-
-    # %%
-    if dataname == "Unemployment":
-
-        xticklabels = list()
-        for i in np.arange(2002, 2022):
-            xticklabels.append(str(i) + " Jan")
-
-        xticks_int = 100
-        fig, (ax1, ax2) = plt.subplots(
-            2, 1, figsize=(20, 4), sharex=True, gridspec_kw={"height_ratios": [3, 0.5]}
-        )
-
-        _ = ax1.plot(testOriginal.reshape(-1), label="original")
-        _ = ax1.plot(testForecast_mean.reshape(-1), color="red", label="predict")
-        _ = ax1.plot(testForecast_uq.reshape(-1), color="grey", alpha=0.8)
-        _ = ax1.plot(testForecast_lq.reshape(-1), color="grey", alpha=0.8)
-        _ = ax1.fill_between(
-            np.arange(size),
-            testForecast_uq.reshape(-1),
-            testForecast_lq.reshape(-1),
-            color="grey",
-            alpha=0.4,
-        )
-        _ = ax1.legend()
-
-        _ = sns.heatmap(
-            1 - forecast_d_MC_argmax.reshape(1, -1),
-            linewidth=0,
-            cbar=False,
-            alpha=1,
-            cmap=cmap,
-            vmin=0,
-            vmax=1,
-            ax=ax2,
-        )
-
-        _ = ax2.set_xticks(np.arange(9, test_len, 12))
-        _ = ax2.set_xticklabels(xticklabels)
-        _ = plt.xticks(rotation=0)
-        _ = plt.suptitle("%s" % (dataname))
-        plt.savefig(figdirectory + "Prediction.png", format="png")
-        plt.show()
-
-        save_rmse_mape(dataname, res)
-
-    # %%
-    if dataname == "Hangzhou":
-        for station in [0, 40]:
-            fig, (ax1, ax2) = plt.subplots(
-                2,
-                1,
-                figsize=(10, 4),
-                sharex=True,
-                gridspec_kw={"height_ratios": [3, 0.5]},
-            )
-            ax1.plot(testOriginal[:, station], label="original")
-            ax1.plot(testForecast_mean[:, station], label="predict")
-            ax1.plot(testForecast_uq[:, station], color="grey", alpha=0.8)
-            ax1.plot(testForecast_lq[:, station], color="grey", alpha=0.8)
-            ax1.fill_between(
-                np.arange(size),
-                testForecast_uq[:, station],
-                testForecast_lq[:, station],
-                color="grey",
-                alpha=0.4,
-            )
-            ax1.legend()
-            sns.heatmap(
-                1 - forecast_d_MC_argmax.reshape(1, -1),
-                linewidth=0,
-                cbar=False,
-                alpha=1,
-                cmap=cmap,
-                vmin=0,
-                vmax=1,
-                ax=ax2,
-            )
-
-            plt.suptitle("%s #%i" % (dataname, station))
-            plt.savefig(figdirectory + "Station %i" % (station) + ".png", format="png")
-            plt.show()
-
-        save_rmse_mape(dataname, res)
-
-        print("Long term:")
-        (
-            res,
-            testForecast_mean,
-            testOriginal,
-            size,
-            forecast_d_MC_argmax,
-            testForecast_uq,
-            testForecast_lq,
-        ) = forecast(
-            model,
-            testX[:, 0:1, :],
-            testY[:, 0:1, :],
-            moments,
-            d_dim,
-            means,
-            trend,
-            test_len,
-            freq,
-            RawDataOriginal,
-            remove_mean,
-            remove_residual,
-            forecaststep,
-            MC_S,
-        )
-
-        save_rmse_mape(dataname, res, "Long-term")
-
-    # %%
-    if dataname == "Seattle":
-        for station in [0, 322]:
-            fig, (ax1, ax2) = plt.subplots(
-                2,
-                1,
-                figsize=(10, 4),
-                sharex=True,
-                gridspec_kw={"height_ratios": [3, 0.5]},
-            )
-            ax1.plot(testOriginal[:, station], label="original")
-            ax1.plot(testForecast_mean[:, station], label="predict")
-            ax1.plot(testForecast_uq[:, station], color="grey", alpha=0.8)
-            ax1.plot(testForecast_lq[:, station], color="grey", alpha=0.8)
-            ax1.fill_between(
-                np.arange(size),
-                testForecast_uq[:, station],
-                testForecast_lq[:, station],
-                color="grey",
-                alpha=0.4,
-            )
-            ax1.legend()
-            sns.heatmap(
-                forecast_d_MC_argmax.reshape(1, -1),
-                linewidth=0,
-                cbar=False,
-                alpha=1,
-                cmap=cmap,
-                vmin=0,
-                vmax=1,
-                ax=ax2,
-            )
-
-            plt.suptitle("%s #%i" % (dataname, station))
-            plt.savefig(figdirectory + "Station %i" % (station) + ".png", format="png")
-            plt.show()
-
-        save_rmse_mape(dataname, res)
-
-        print("Long term:")
-        (
-            res,
-            testForecast_mean,
-            testOriginal,
-            size,
-            forecast_d_MC_argmax,
-            testForecast_uq,
-            testForecast_lq,
-        ) = forecast(
-            model,
-            testX[:, 0:1, :],
-            testY[:, 0:1, :],
-            moments,
-            d_dim,
-            means,
-            trend,
-            test_len,
-            freq,
-            RawDataOriginal,
-            remove_mean,
-            remove_residual,
-            forecaststep,
-            MC_S,
-        )
-
-        save_rmse_mape(dataname, res, "Long-term")
-
-    # %%
-    if dataname == "Pacific":
-
-        for station in [0, 840]:
-            fig, (ax1, ax2) = plt.subplots(
-                2,
-                1,
-                figsize=(10, 4),
-                sharex=True,
-                gridspec_kw={"height_ratios": [3, 0.5]},
-            )
-
-            ax1.plot(testOriginal[:, station], label="original")
-            ax1.plot(testForecast_mean[:, station], label="predict")
-            ax1.plot(testForecast_uq[:, station], color="grey", alpha=0.8)
-            ax1.plot(testForecast_lq[:, station], color="grey", alpha=0.8)
-            ax1.fill_between(
-                np.arange(size),
-                testForecast_uq[:, station],
-                testForecast_lq[:, station],
-                color="grey",
-                alpha=0.4,
-            )
-            ax1.legend()
-
-            sns.heatmap(
-                forecast_d_MC_argmax.reshape(1, -1),
-                linewidth=0,
-                cbar=False,
-                alpha=1,
-                cmap=cmap,
-                vmin=0,
-                vmax=1,
-                ax=ax2,
-            )
-
-            plt.suptitle("%s #%i" % (dataname, station))
-            plt.savefig(figdirectory + "Station %i" % (station) + ".png", format="png")
-            plt.show()
-
-        save_rmse_mape(dataname, res)
-
-        print("Long term:")
-        (
-            res,
-            testForecast_mean,
-            testOriginal,
-            size,
-            forecast_d_MC_argmax,
-            testForecast_uq,
-            testForecast_lq,
-        ) = forecast(
-            model,
-            testX[:, 0:1, :],
-            testY[:, 0:1, :],
-            moments,
-            d_dim,
-            means,
-            trend,
-            test_len,
-            freq,
-            RawDataOriginal,
-            remove_mean,
-            remove_residual,
-            forecaststep,
-            MC_S,
-        )
-
-        save_rmse_mape(dataname, res, "Long-term")
-
-    # %%
-    if dataname == "Electricity":
-        for station in [0, 24]:
-            fig, (ax1, ax2) = plt.subplots(
-                2,
-                1,
-                figsize=(10, 4),
-                sharex=True,
-                gridspec_kw={"height_ratios": [3, 0.5]},
-            )
-            ax1.plot(testOriginal[:, station], label="original")
-            ax1.plot(testForecast_mean[:, station], label="predict")
-            ax1.plot(testForecast_uq[:, station], color="grey", alpha=0.8)
-            ax1.plot(testForecast_lq[:, station], color="grey", alpha=0.8)
-            ax1.fill_between(
-                np.arange(size),
-                testForecast_uq[:, station],
-                testForecast_lq[:, station],
-                color="grey",
-                alpha=0.4,
-            )
-            ax1.legend()
-            sns.heatmap(
-                forecast_d_MC_argmax.reshape(1, -1),
-                linewidth=0,
-                cbar=False,
-                alpha=1,
-                cmap=cmap,
-                vmin=0,
-                vmax=1,
-                ax=ax2,
-            )
-
-            plt.suptitle("%s #%i" % (dataname, station))
-            plt.savefig(figdirectory + "Station %i" % (station) + ".png", format="png")
-            plt.show()
-
-        save_rmse_mape(dataname, res)

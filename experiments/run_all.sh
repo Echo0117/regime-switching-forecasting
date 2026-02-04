@@ -4,9 +4,16 @@ set -euo pipefail
 # --------------------------
 # Config (edit as you like)
 # --------------------------
+# Usage examples:
+#   ./experiments/run_all.sh                    # Default: cpu device
+#   ./experiments/run_all.sh cuda               # Use CUDA
+#   DATA_DIR="Deep_Switching_State_Space_Model/data/Toy_exp2_V1_0.5_V2_1.0" ./experiments/run_all.sh cuda
+#
+# IMPORTANT: Pass DATA_DIR as environment variable, NOT as --data-dir flag
+#            Device is the only positional argument
 
-# Device: cuda | mps | cpu
-DEVICE=${1:-cuda}
+# Device: cuda | mps | cpu (defaults to cpu if not specified)
+DEVICE=${1:-cpu}
 
 # Mixed precision (harmless on CPU/MPS; your Python ignores if not supported)
 AMP_FLAG="--amp"
@@ -19,16 +26,31 @@ S4_PATH="./s4"
 # Output CSV (single combined table for *all* datasets)
 OUTCSV="experiments/results_all_${DEVICE}.csv"
 
-# Save directory for plots (use /tmp for local fast I/O, avoiding OneDrive sync issues)
-SAVE_DIR="${SAVE_DIR:-/tmp/regime_switching_figures}"
-mkdir -p "${SAVE_DIR}"
-echo "[INFO] Plots will be saved to: ${SAVE_DIR}"
+# Save directory for plots (base directory)
+SAVE_DIR="${SAVE_DIR:-experiments/figures}"
 
 # Common sweep settings
 LAGS="${LAGS:-48}"
 ALPHA="${ALPHA:-0.1}"
 GAMMA="${GAMMA:-0.01}"
 TRAIN_SIZE="${TRAIN_SIZE:-1000}"
+
+# Optional custom data directory (for Experiment 2 datasets)
+# Example: DATA_DIR="Deep_Switching_State_Space_Model/data/Toy_exp2_V1_0.5_V2_1.0"
+DATA_DIR="${DATA_DIR:-}"
+
+# Extract dataset_id from DATA_DIR if provided (for organizing outputs)
+if [[ -n "${DATA_DIR}" ]]; then
+  DATASET_ID="$(basename "${DATA_DIR}")"
+  # Append dataset_id to save directory
+  SAVE_DIR="${SAVE_DIR}_${DATASET_ID}"
+  echo "[INFO] Custom data directory detected: ${DATA_DIR}"
+  echo "[INFO] Dataset ID: ${DATASET_ID}"
+fi
+
+# Create save directory and show path
+mkdir -p "${SAVE_DIR}"
+echo "[INFO] Plots will be saved to: ${SAVE_DIR}"
 
 # Models to run (edit to add/remove)
 # MODELS=("ds3m")
@@ -94,6 +116,11 @@ for PROB in "${PROBLEMS[@]}"; do
   # Append optional S4 path only if set
   if (( ${#S4_PATH_ARG[@]} )); then
     cmd+=("${S4_PATH_ARG[@]}")
+  fi
+
+  # Append optional data directory if set
+  if [[ -n "${DATA_DIR}" ]]; then
+    cmd+=(--data-dir "${DATA_DIR}")
   fi
 
   # (Optional) echo the command for debugging
