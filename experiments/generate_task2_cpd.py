@@ -16,8 +16,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('Agg')
+from matplotlib.colors import LinearSegmentedColormap
 from pathlib import Path
 import argparse
+from typing import Dict
 
 # Add project root to path
 HERE = os.path.dirname(__file__)
@@ -28,6 +30,13 @@ if PROJ_ROOT not in sys.path:
 # Output directory
 OUTPUT_DIR = Path("overleaf_upload/figures/task2_cpd")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Custom low-saturation red-blue colormap
+CUSTOM_CMAP = LinearSegmentedColormap.from_list(
+    'soft_redblue',
+    ['#6090c0', '#d67575'],  # Even deeper soft blue to even deeper soft red
+    N=256
+)
 
 # Import after path setup
 from experiments.utils.ds3m_utils import load_ds3m_data, load_ds3m_model, forecast
@@ -41,7 +50,7 @@ except ImportError:
     print("Warning: ruptures not installed. Run: pip install ruptures")
 
 
-def run_ruptures_cpd(data, test_len, method='Binseg', model='l2', penalty=None, min_size=10, n_bkps=5):
+def run_ruptures_cpd(data, test_len, method='Binseg', model='l2', penalty=None, min_size=5, n_bkps=5):
     """Run ruptures change point detection on full data and return breakpoints."""
     if not RUPTURES_AVAILABLE:
         return None
@@ -65,7 +74,8 @@ def run_ruptures_cpd(data, test_len, method='Binseg', model='l2', penalty=None, 
         else:  # Pelt
             algo = rpt.Pelt(model=model, min_size=min_size).fit(data_norm)
             if penalty is None:
-                penalty = np.log(len(data_norm)) * 2  # BIC-like penalty
+                # Use BIC-like penalty for balanced detection
+                penalty = np.log(len(data_norm)) * 0.3
             bkps = algo.predict(pen=penalty)
     except Exception as e:
         print(f"    Ruptures failed: {e}, using fallback")
@@ -83,15 +93,111 @@ def run_ruptures_cpd(data, test_len, method='Binseg', model='l2', penalty=None, 
     }
 
 
-def plot_ds3m_vs_ruptures_heatmap(dataname, d_argmax, ruptures_bkps, test_len, save_path, d_true=None):
-    """Create regime heatmap comparison: Ground Truth (top, if available) + DS3M + Ruptures."""
+def _switches_from_labels(labels: np.ndarray) -> np.ndarray:
+    """Return switch indices (where regime label changes)."""
+    labels = np.asarray(labels).astype(int)
+    return np.where(np.diff(labels) != 0)[0] + 1
+
+
+def cpd_precision_recall_f1(
+    true_switches: np.ndarray,
+    pred_switches: np.ndarray,
+    tol: int = 5,
+) -> Dict[str, float]:
+    """
+    Compute precision/recall/F1 for changepoint detection with tolerance window.
+
+    Uses greedy one-to-one matching: each predicted switch is matched to the
+    closest unmatched true switch within ±tol time steps.
+
+    Parameters
+    ----------
+    true_switches : np.ndarray
+        Ground truth switch indices
+    pred_switches : np.ndarray
+        Predicted switch indices
+    tol : int
+        Tolerance window (±tol time steps)
+
+    Returns
+    -------
+    metrics : dict
+        Dictionary with precision, recall, f1, tp, fp, fn
+    """
+    true_switches = np.asarray(true_switches, dtype=int)
+    pred_switches = np.asarray(pred_switches, dtype=int)
+
+    # Edge cases
+    if true_switches.size == 0 and pred_switches.size == 0:
+        return {
+            "precision": 1.0, "recall": 1.0, "f1": 1.0,
+            "tp": 0.0, "fp": 0.0, "fn": 0.0
+        }
+    if true_switches.size == 0:
+        return {
+            "precision": 0.0, "recall": 1.0, "f1": 0.0,
+            "tp": 0.0, "fp": float(len(pred_switches)), "fn": 0.0
+        }
+    if pred_switches.size == 0:
+        return {
+            "precision": 1.0, "recall": 0.0, "f1": 0.0,
+            "tp": 0.0, "fp": 0.0, "fn": float(len(true_switches))
+        }
+
+    # Greedy matching
+    used_true = np.zeros(len(true_switches), dtype=bool)
+    tp = 0
+
+    for p in pred_switches:
+        # Find closest unmatched true switch
+        distances = np.abs(true_switches - p)
+        distances[used_true] = 10**9  # Mark used as infinitely far
+        j = int(np.argmin(distances))
+
+        if distances[j] <= tol:
+            used_true[j] = True
+            tp += 1
+
+    fp = len(pred_switches) - tp
+    fn = len(true_switches) - tp
+
+    # Compute metrics
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 1.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 1.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+    return {
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+        "tp": float(tp),
+        "fp": float(fp),
+        "fn": float(fn)
+    }
+
+
+def plot_ds3m_vs_ruptures_heatmap(dataname, d_argmax, ruptures_results_dict, test_len, save_path, d_true=None, metrics=None):
+    """
+    Create regime heatmap comparison: Ground Truth (if available) + DS3M + Ruptures methods.
+
+    Parameters
+    ----------
+    ruptures_results_dict : dict
+        Dictionary mapping method names (e.g., 'Binseg', 'Pelt') to breakpoints
+    """
     import seaborn as sns
 
     has_gt = d_true is not None
-    n_rows = 3 if has_gt else 2
+    n_ruptures_methods = len(ruptures_results_dict) if ruptures_results_dict else 0
+    n_rows = (1 if has_gt else 0) + 1 + n_ruptures_methods  # GT + DS3M + Ruptures methods
+
     ratios = [1] * n_rows
     fig, axes = plt.subplots(n_rows, 1, figsize=(16, 1.5 * n_rows), sharex=True,
                              gridspec_kw={'height_ratios': ratios, 'hspace': 0.3})
+
+    # Handle single row case
+    if n_rows == 1:
+        axes = [axes]
 
     T = len(d_argmax)
     t = np.arange(T)
@@ -110,11 +216,18 @@ def plot_ds3m_vs_ruptures_heatmap(dataname, d_argmax, ruptures_bkps, test_len, s
             gt_norm = 1 - gt
         else:
             gt_norm = (gt_dim - 1 - gt) / (gt_dim - 1) if gt_dim > 1 else gt.astype(float)
-        cmap_gt = plt.get_cmap('RdBu', max(2, gt_dim))
+        cmap_gt = CUSTOM_CMAP
         sns.heatmap(gt_norm.reshape(1, -1), ax=ax_gt, cbar=False,
                     cmap=cmap_gt, vmin=0, vmax=1, linewidth=0)
         n_switches_gt = int(np.sum(np.diff(gt) != 0))
-        ax_gt.set_title(f'{dataname} | Ground Truth (Switches: {n_switches_gt})',
+
+        # Add metrics info to title if available
+        extra = ""
+        if metrics is not None and "gt" in metrics:
+            m = metrics["gt"]
+            extra = f" (GT: {int(m.get('n_switches', n_switches_gt))})"
+
+        ax_gt.set_title(f'{dataname} | Ground Truth (Switches: {n_switches_gt}){extra}',
                         fontsize=12, fontweight='bold')
         ax_gt.set_yticks([])
         ax_gt.set_ylabel('Truth')
@@ -130,66 +243,83 @@ def plot_ds3m_vs_ruptures_heatmap(dataname, d_argmax, ruptures_bkps, test_len, s
     else:
         arr_normalized = (d_dim - 1 - d_argmax) / (d_dim - 1) if d_dim > 1 else d_argmax
 
-    cmap = plt.get_cmap('RdBu', max(2, d_dim))
+    cmap = CUSTOM_CMAP
     sns.heatmap(arr_normalized.reshape(1, -1), ax=ax1, cbar=False,
                 cmap=cmap, vmin=0, vmax=1, linewidth=0)
 
     n_switches_ds3m = np.sum(np.diff(d_argmax) != 0)
-    ax1.set_title(f'{dataname} | DS3M discrete states (Switches: {n_switches_ds3m})',
+
+    # Add metrics to title if available
+    extra = ""
+    if metrics is not None and "ds3m" in metrics and has_gt:
+        m = metrics["ds3m"]
+        extra = f" | P={m['precision']:.2f} R={m['recall']:.2f} F1={m['f1']:.2f}"
+
+    ax1.set_title(f'{dataname} | DS3M discrete states (Switches: {n_switches_ds3m}){extra}',
                   fontsize=12, fontweight='bold')
     ax1.set_yticks([])
     ax1.set_ylabel('DS3M')
     ax1.set_xticks([])
     row_idx += 1
 
-    # --- Ruptures Regime Heatmap ---
-    ax2 = axes[row_idx]
+    # --- Ruptures Regime Heatmaps (one per method) ---
+    if ruptures_results_dict:
+        for method_name, ruptures_bkps in ruptures_results_dict.items():
+            ax_rup = axes[row_idx]
 
-    if ruptures_bkps is not None and len(ruptures_bkps) > 0:
-        # Create regime labels from breakpoints
-        ruptures_regimes = np.zeros(T, dtype=int)
-        regime_id = 0
-        prev_bp = 0
+            if ruptures_bkps is not None and len(ruptures_bkps) > 0:
+                # Create regime labels - ALTERNATE between 0 and 1 (red/blue only)
+                ruptures_regimes = np.zeros(T, dtype=int)
+                regime_id = 0
+                prev_bp = 0
 
-        for bp in ruptures_bkps:
-            if bp > T:
-                bp = T
-            ruptures_regimes[prev_bp:bp] = regime_id
-            regime_id += 1
-            prev_bp = bp
+                for bp in ruptures_bkps:
+                    if bp > T:
+                        bp = T
+                    if bp > prev_bp:  # Only assign if segment is non-empty
+                        ruptures_regimes[prev_bp:bp] = regime_id % 2  # Alternate: 0, 1, 0, 1, ...
+                        regime_id += 1
+                    prev_bp = bp
 
-        # Normalize for coloring
-        n_ruptures_regimes = len(np.unique(ruptures_regimes))
-        if n_ruptures_regimes == 1:
-            ruptures_normalized = np.zeros(T)
-        elif n_ruptures_regimes == 2:
-            ruptures_normalized = 1 - ruptures_regimes
-        else:
-            ruptures_normalized = (n_ruptures_regimes - 1 - ruptures_regimes) / (n_ruptures_regimes - 1)
+                # Count actual switches (transitions between segments)
+                n_switches_ruptures = int(np.sum(np.diff(ruptures_regimes) != 0))
 
-        cmap_rup = plt.get_cmap('RdBu', max(2, n_ruptures_regimes))
-        sns.heatmap(ruptures_normalized.reshape(1, -1), ax=ax2, cbar=False,
-                    cmap=cmap_rup, vmin=0, vmax=1, linewidth=0)
+                # Simple binary coloring (red/blue only)
+                ruptures_normalized = 1 - ruptures_regimes  # 0->1 (blue), 1->0 (red)
+                cmap_rup = CUSTOM_CMAP  # Always use 2 colors
+                sns.heatmap(ruptures_normalized.reshape(1, -1), ax=ax_rup, cbar=False,
+                            cmap=cmap_rup, vmin=0, vmax=1, linewidth=0)
 
-        n_switches_ruptures = len(ruptures_bkps) - 1
-        ax2.set_title(f'{dataname} | Ruptures (Binseg) discrete states (Switches: {n_switches_ruptures})',
-                      fontsize=12, fontweight='bold')
-    else:
-        # No ruptures result - show empty heatmap
-        ax2.text(0.5, 0.5, 'Ruptures not available', ha='center', va='center',
-                transform=ax2.transAxes, fontsize=12)
-        ax2.set_title(f'{dataname} | Ruptures (Binseg) discrete states',
-                      fontsize=12, fontweight='bold')
+                # Add metrics to title if available
+                extra = ""
+                metrics_key = f"ruptures_{method_name.lower()}"
+                if metrics is not None and metrics_key in metrics and has_gt:
+                    m = metrics[metrics_key]
+                    extra = f" | P={m['precision']:.2f} R={m['recall']:.2f} F1={m['f1']:.2f}"
 
-    ax2.set_yticks([])
-    ax2.set_ylabel('Ruptures')
-    ax2.set_xlabel('time')
+                ax_rup.set_title(f'{dataname} | Ruptures ({method_name}) discrete states (Switches: {n_switches_ruptures}){extra}',
+                          fontsize=12, fontweight='bold')
+            else:
+                # No ruptures result
+                ax_rup.text(0.5, 0.5, f'Ruptures {method_name} not available', ha='center', va='center',
+                        transform=ax_rup.transAxes, fontsize=12)
+                ax_rup.set_title(f'{dataname} | Ruptures ({method_name}) discrete states',
+                          fontsize=12, fontweight='bold')
 
-    # Add x-axis ticks at regular intervals
-    tick_interval = max(T // 10, 1)
-    tick_positions = np.arange(0, T, tick_interval)
-    ax2.set_xticks(tick_positions)
-    ax2.set_xticklabels(tick_positions, rotation=0, fontsize=9)
+            ax_rup.set_yticks([])
+            ax_rup.set_ylabel(f'{method_name}')
+
+            # Only add x-axis to last row
+            if row_idx == n_rows - 1:
+                ax_rup.set_xlabel('time')
+                tick_interval = max(T // 10, 1)
+                tick_positions = np.arange(0, T, tick_interval)
+                ax_rup.set_xticks(tick_positions)
+                ax_rup.set_xticklabels(tick_positions, rotation=0, fontsize=9)
+            else:
+                ax_rup.set_xticks([])
+
+            row_idx += 1
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=200, bbox_inches='tight', facecolor='white')
@@ -295,63 +425,222 @@ def run_task2_for_dataset(dataname, args):
         else:
             ds3m_result['y_pred'] = y_pred - offset
 
-    # Run Ruptures
-    ruptures_result = None
+    # Run Ruptures on FULL series (not just test tail)
+    # This is the FIX for the normalization issue
+    # Run BOTH Pelt and Binseg for comparison
+    ruptures_results = {}
+    full_series_1d = None
+
     if RUPTURES_AVAILABLE:
-        print(f"  Running Ruptures CPD...")
-        # Get full data for ruptures
-        if y_true.ndim > 1:
-            data_1d = y_true[:, 0]
+        methods_str = "Pelt + Binseg" if dataname.startswith("Toy") else "Pelt"
+        print(f"  Running Ruptures CPD ({methods_str})...")
+
+        # FIX: Use full series from cache, not just test tail
+        # This ensures ruptures has proper train/test split for normalization
+        if cached is not None and 'data' in cached and cached['data'] is not None:
+            full_data = cached['data']
+            if full_data.ndim > 1:
+                full_series_1d = full_data[:, 0]
+            else:
+                full_series_1d = full_data
+            print(f"    Using full series: {len(full_series_1d)} points (test_len={test_len})")
         else:
-            data_1d = y_true
+            # Fallback: use y_true if full data not available
+            print(f"    Warning: Full series not in cache, using y_true (may cause normalization issues)")
+            if y_true.ndim > 1:
+                full_series_1d = y_true[:, 0]
+            else:
+                full_series_1d = y_true
 
-        ruptures_result = run_ruptures_cpd(
-            data_1d,
-            test_len=min(test_len, len(data_1d)),
-            method='Binseg',
-            model='l2',
-            penalty=args.ruptures_penalty,
-            min_size=args.ruptures_min_size,
-            n_bkps=10,
-        )
+        # Determine which methods to run based on dataset
+        if dataname.startswith("Toy"):
+            # Toy: run both for comparison
+            methods_to_run = ['Binseg', 'Pelt']
+        else:
+            # All real datasets: use Pelt
+            methods_to_run = ['Pelt']
 
-        if ruptures_result:
-            print(f"    Ruptures detected {ruptures_result['n_switches']} change points")
-            print(f"    Switches in test: {ruptures_result['switches_in_test']}")
+        # Run selected methods
+        for method_name in methods_to_run:
+            # Use more breakpoints for better detection
+            n_bkps_to_use = 80 if method_name == 'Binseg' else 10
+
+            result = run_ruptures_cpd(
+                full_series_1d,
+                test_len=test_len,
+                method=method_name,
+                model='l2',
+                penalty=args.ruptures_penalty,
+                min_size=args.ruptures_min_size,
+                n_bkps=n_bkps_to_use,
+            )
+
+            if result:
+                ruptures_results[method_name] = result
+                print(f"    {method_name}: {result['n_switches']} change points total, "
+                      f"{result['switches_in_test']} in test")
+
+    # Compute accuracy metrics for Toy dataset
+    metrics = None
+    d_argmax_test = ds3m_result['d_argmax']
+    T_test = len(d_argmax_test)
 
     # Load ground truth regime labels for Toy
     d_true = None
     if dataname.startswith("Toy"):
-        gt_path = Path("Deep_Switching_State_Space_Model/data/Toy_exp1/simulation_data_nonlinear_d.csv")
-        if gt_path.exists():
-            d_true = np.loadtxt(gt_path).astype(int)
-            print(f"  Loaded ground truth regimes: {len(d_true)} points, {int(np.sum(np.diff(d_true)!=0))} switches")
+        # Try multiple Toy variants - cached forecast may be from different variant
+        toy_variants = [
+            "Toy_og",  # Original Toy dataset (24 switches in test)
+            "Toy_exp1",  # Toy exp1 (1 switch in test)
+            "Toy_exp2_V1_0.5_V2_2.0",  # Toy exp2
+        ]
+
+        for variant in toy_variants:
+            gt_path = Path(f"Deep_Switching_State_Space_Model/data/{variant}/simulation_data_nonlinear_d.csv")
+            if gt_path.exists():
+                d_true_candidate = np.loadtxt(gt_path).astype(int)
+                # Check if length matches cached data
+                if cached and 'data' in cached:
+                    expected_len = len(cached['data'])
+                    if len(d_true_candidate) >= expected_len:
+                        d_true = d_true_candidate
+                        test_switches = int(np.sum(np.diff(d_true[-T_test:]) != 0))
+                        print(f"  Loaded ground truth from {variant}: {len(d_true)} points, "
+                              f"{int(np.sum(np.diff(d_true)!=0))} total switches, "
+                              f"{test_switches} switches in test")
+                        break
+
+    # Determine evaluation window: full series or test-only
+    eval_full_series = getattr(args, "eval_full_series", False)
+
+    if d_true is not None:
+        if eval_full_series:
+            # Evaluate on FULL series (train + test) for better statistics
+            # Use cached d_argmax for full series if available
+            if cached and 'states' in cached and cached['states'] is not None:
+                # states contains full inference results
+                # For now, use test-only but mark this as TODO
+                print("  Warning: --eval-full-series requested but full DS3M states not in cache.")
+                print("           Falling back to test-only evaluation.")
+                eval_full_series = False
+
+        if eval_full_series:
+            # TODO: Implement full-series evaluation
+            # Would need full DS3M d_argmax (not just test)
+            pass
+        else:
+            # Test-only evaluation (current behavior)
+            d_true_test = np.asarray(d_true)[-T_test:]
+            true_switches = _switches_from_labels(d_true_test)
+            ds3m_switches = _switches_from_labels(d_argmax_test)
+
+            metrics = {
+                "gt": {"n_switches": float(len(true_switches))}
+            }
+
+            # DS3M metrics
+            metrics["ds3m"] = cpd_precision_recall_f1(
+                true_switches, ds3m_switches, tol=getattr(args, "cpt_tol", 5)
+            )
+            print(f"  DS3M metrics (test-only, n={len(true_switches)}): "
+                  f"P={metrics['ds3m']['precision']:.3f}, R={metrics['ds3m']['recall']:.3f}, "
+                  f"F1={metrics['ds3m']['f1']:.3f}")
+
+    # Ruptures metrics (convert absolute breakpoints to test-relative indices)
+    # Process each ruptures method
+    ruptures_bkps_test_relative_dict = {}
+
+    if d_true is not None and ruptures_results and full_series_1d is not None:
+        N_total = len(full_series_1d)
+        test_start_idx = N_total - T_test
+        true_switches = _switches_from_labels(np.asarray(d_true)[-T_test:])
+
+        for method_name, ruptures_result in ruptures_results.items():
+            # Filter breakpoints in test window
+            ruptures_bkps_abs = np.array(ruptures_result['breakpoints'][:-1], dtype=int)
+            ruptures_bkps_in_test = ruptures_bkps_abs[ruptures_bkps_abs >= test_start_idx]
+
+            # Convert to test-relative indices
+            ruptures_switches_test_relative = ruptures_bkps_in_test - test_start_idx
+
+            # Compute metrics
+            metrics_key = f"ruptures_{method_name.lower()}"
+            metrics[metrics_key] = cpd_precision_recall_f1(
+                true_switches, ruptures_switches_test_relative, tol=getattr(args, "cpt_tol", 5)
+            )
+            print(f"  {method_name} metrics (test-only, n={len(true_switches)}): "
+                  f"P={metrics[metrics_key]['precision']:.3f}, R={metrics[metrics_key]['recall']:.3f}, "
+                  f"F1={metrics[metrics_key]['f1']:.3f}")
+
+            # For plotting, convert ALL breakpoints to test-relative
+            ruptures_bkps_test_relative = []
+            for bp in ruptures_result['breakpoints']:
+                if bp > test_start_idx:
+                    ruptures_bkps_test_relative.append(bp - test_start_idx)
+            if ruptures_bkps_test_relative and ruptures_bkps_test_relative[-1] != T_test:
+                ruptures_bkps_test_relative.append(T_test)  # Add final endpoint if not present
+
+            ruptures_bkps_test_relative_dict[method_name] = ruptures_bkps_test_relative
+
+    elif ruptures_results:
+        # No ground truth - just convert breakpoints for plotting
+        N_total = len(full_series_1d) if full_series_1d is not None else T_test
+        test_start_idx = N_total - T_test
+
+        for method_name, ruptures_result in ruptures_results.items():
+            ruptures_bkps_test_relative = []
+            for bp in ruptures_result['breakpoints']:
+                if bp > test_start_idx:
+                    ruptures_bkps_test_relative.append(bp - test_start_idx)
+            if ruptures_bkps_test_relative and ruptures_bkps_test_relative[-1] != T_test:
+                ruptures_bkps_test_relative.append(T_test)
+
+            ruptures_bkps_test_relative_dict[method_name] = ruptures_bkps_test_relative
 
     # Generate plots
-    # DS3M vs Ruptures regime heatmap comparison
-    ruptures_bkps = ruptures_result['breakpoints'] if ruptures_result else None
     plot_ds3m_vs_ruptures_heatmap(
         dataname,
-        ds3m_result['d_argmax'],
-        ruptures_bkps,
+        d_argmax_test,
+        ruptures_bkps_test_relative_dict,
         test_len,
         OUTPUT_DIR / f"{dataname}_regime_comparison.png",
         d_true=d_true,
+        metrics=metrics,
     )
 
     # Compute and return metrics
-    n_switches_ds3m = np.sum(np.diff(ds3m_result['d_argmax']) != 0)
+    n_switches_ds3m = np.sum(np.diff(d_argmax_test) != 0)
 
     result = {
         'dataset': dataname,
         'ds3m_switches': n_switches_ds3m,
     }
 
-    if ruptures_result and ruptures_bkps:
-        n_switches_ruptures = len(ruptures_bkps) - 1
-        result['ruptures_switches'] = n_switches_ruptures
-    else:
-        result['ruptures_switches'] = 0
+    # Add ruptures switches for each method
+    for method_name in ['Binseg', 'Pelt']:
+        if method_name in ruptures_results:
+            n_switches = ruptures_results[method_name]['switches_in_test']
+            result[f'ruptures_{method_name.lower()}_switches'] = n_switches
+        else:
+            result[f'ruptures_{method_name.lower()}_switches'] = 0
+
+    # Add Toy metrics to result
+    if metrics is not None and "ds3m" in metrics:
+        result.update({
+            'toy_ds3m_precision': metrics["ds3m"]["precision"],
+            'toy_ds3m_recall': metrics["ds3m"]["recall"],
+            'toy_ds3m_f1': metrics["ds3m"]["f1"],
+        })
+
+    # Add ruptures metrics for each method
+    for method_name in ['Binseg', 'Pelt']:
+        metrics_key = f"ruptures_{method_name.lower()}"
+        if metrics is not None and metrics_key in metrics:
+            result.update({
+                f'toy_{metrics_key}_precision': metrics[metrics_key]["precision"],
+                f'toy_{metrics_key}_recall': metrics[metrics_key]["recall"],
+                f'toy_{metrics_key}_f1': metrics[metrics_key]["f1"],
+            })
 
     return result
 
@@ -380,8 +669,13 @@ def main():
                         help="Datasets to process")
     parser.add_argument("--ruptures-penalty", type=float, default=None,
                         help="Ruptures penalty (auto if None)")
-    parser.add_argument("--ruptures-min-size", type=int, default=10,
+    parser.add_argument("--ruptures-min-size", type=int, default=5,
                         help="Ruptures min segment size")
+    parser.add_argument("--cpt-tol", type=int, default=5,
+                        help="Toy CPD: match tolerance in time steps for precision/recall (default: ±5)")
+    parser.add_argument("--eval-full-series", action="store_true",
+                        help="For Toy: evaluate on full series (train+test) instead of test-only. "
+                             "Gives n=77 switches instead of n=1 for better statistics.")
     args = parser.parse_args()
 
     print("="*70)

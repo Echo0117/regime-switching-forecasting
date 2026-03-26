@@ -691,6 +691,7 @@ class DS3MWrapper:
                 ds["RawDataOriginal"],
                 remove_mean=ds["remove_mean"],
                 remove_residual=ds["remove_residual"],
+                dataname=ds["dataname"],
             )
             # model.eval()  # <- important: disable dropout etc.
             # res, testForecast_mean, testOriginal, size, d_argmax, uq, lq = forecast(

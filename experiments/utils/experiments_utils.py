@@ -1,9 +1,17 @@
 import os, json
 from matplotlib import pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 from pathlib import Path
 import sys
 import seaborn as sns
+
+# Custom low-saturation red-blue colormap (matching Task 2)
+CUSTOM_CMAP = LinearSegmentedColormap.from_list(
+    'soft_redblue',
+    ['#85b0d0', '#e59999'],  # Deeper soft blue to deeper soft red
+    N=256
+)
 
 
 HERE = os.path.dirname(__file__)

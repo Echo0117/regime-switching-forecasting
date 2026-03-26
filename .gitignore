@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+
+# Output directories (regenerable)
+cached_forecasts/
+agaci_test/
+figures/
+results/
+
+# Large data files
+*.npz
+*.pkl

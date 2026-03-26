@@ -201,18 +201,65 @@ def clean_series(y):
     return y
 
 
-def create_lag_features(data, lags):
-    """Create lag feature matrix for 1D data."""
-    data = np.asarray(data).flatten()
-    N = len(data) - lags
-    if N <= 0:
-        raise ValueError(f"Data length {len(data)} too short for lags={lags}")
-    X = np.zeros((N, lags))
-    y = np.zeros(N)
-    for i in range(N):
-        X[i] = data[i:i+lags]
-        y[i] = data[i+lags]
-    return X, y
+def create_lag_features(data, lags, multidim=False):
+    """
+    Create lag feature matrix.
+
+    Parameters
+    ----------
+    data : array-like
+        1D array (for single-dim) or 2D array (T, D) for multi-dim
+    lags : int
+        Number of lags
+    multidim : bool
+        If True, treat each dimension as a separate target (multi-output)
+        If False, use only first dimension or flatten to 1D
+
+    Returns
+    -------
+    X : np.ndarray
+        Features of shape (N, lags) for single-dim or (N, lags*D) for multi-dim
+    y : np.ndarray
+        Targets of shape (N,) for single-dim or (N, D) for multi-dim
+    """
+    data = np.asarray(data)
+
+    if not multidim:
+        # Single-dimensional: flatten or take first column
+        if data.ndim > 1:
+            data = data[:, 0]  # Take first dimension
+        data = data.flatten()
+        N = len(data) - lags
+        if N <= 0:
+            raise ValueError(f"Data length {len(data)} too short for lags={lags}")
+        X = np.zeros((N, lags))
+        y = np.zeros(N)
+        for i in range(N):
+            X[i] = data[i:i+lags]
+            y[i] = data[i+lags]
+        return X, y
+    else:
+        # Multi-dimensional: each dimension is a target
+        if data.ndim == 1:
+            # Reshape to (T, 1)
+            data = data.reshape(-1, 1)
+
+        T, D = data.shape
+        N = T - lags
+        if N <= 0:
+            raise ValueError(f"Data length {T} too short for lags={lags}")
+
+        # X: concatenate lags from all dimensions (N, lags * D)
+        X = np.zeros((N, lags * D))
+        # y: all dimensions (N, D)
+        y = np.zeros((N, D))
+
+        for i in range(N):
+            # Flatten lags from all dimensions
+            X[i] = data[i:i+lags, :].flatten()
+            y[i] = data[i+lags, :]
+
+        return X, y
 
 
 def standardize_train_test(X_train, X_test, y_train, y_test):
@@ -223,17 +270,44 @@ def standardize_train_test(X_train, X_test, y_train, y_test):
     X_train_s = (X_train - x_mean) / x_std
     X_test_s = (X_test - x_mean) / x_std
 
-    y_mean = float(np.mean(y_train))
-    y_std = float(np.std(y_train))
-    if y_std < 1e-8:
-        y_std = 1.0
-    y_train_s = (y_train - y_mean) / y_std
-    y_test_s = (y_test - y_mean) / y_std
+    # Handle both 1D and multi-dimensional y
+    if y_train.ndim == 1:
+        y_mean = float(np.mean(y_train))
+        y_std = float(np.std(y_train))
+        if y_std < 1e-8:
+            y_std = 1.0
+        y_train_s = (y_train - y_mean) / y_std
+        y_test_s = (y_test - y_mean) / y_std
+    else:
+        # Multi-dimensional: standardize per dimension
+        y_mean = np.mean(y_train, axis=0)
+        y_std = np.std(y_train, axis=0)
+        y_std = np.where(y_std < 1e-8, 1.0, y_std)
+        y_train_s = (y_train - y_mean) / y_std
+        y_test_s = (y_test - y_mean) / y_std
     return X_train_s, X_test_s, y_train_s, y_test_s, y_mean, y_std
 
 
 def compute_metrics(y_true, y_pred):
-    """Compute comprehensive metrics: RMSE, MAE, MAPE, R2."""
+    """Compute comprehensive metrics: RMSE, MAE, MAPE, R2.
+    For multi-dimensional data, compute metrics per dimension and average."""
+
+    # Handle multi-dimensional predictions
+    if y_true.ndim > 1 and y_pred.ndim > 1:
+        # Compute metrics per dimension and average
+        metrics_per_dim = []
+        for d in range(y_true.shape[1]):
+            m = compute_metrics(y_true[:, d], y_pred[:, d])
+            metrics_per_dim.append(m)
+
+        # Average across dimensions
+        result = {}
+        for key in ['RMSE', 'MAE', 'MAPE', 'R2']:
+            values = [m[key] for m in metrics_per_dim if not np.isnan(m[key])]
+            result[key] = np.mean(values) if values else np.nan
+        return result
+
+    # Single-dimensional case
     mask = ~np.isnan(y_true) & ~np.isnan(y_pred)
     y_t, y_p = y_true[mask], y_pred[mask]
 
@@ -269,6 +343,7 @@ def run_comparison(
     ds3m_force_new=False,
     pernod_test_len=None,
     dim_overrides=None,
+    use_multidim=False,
 ):
     """Run all models on a dataset and return predictions with metrics."""
     print(f"\n{'='*70}")
@@ -306,18 +381,27 @@ def run_comparison(
         if verbose and dim != config['dim']:
             print(f"  Using dim override: {dim}")
 
-    if raw_data.ndim > 1:
-        y_1d = raw_data[:, dim].flatten()
+    # Prepare data: multi-dimensional or single-dimensional
+    if use_multidim and raw_data.ndim > 1:
+        # Multi-dimensional mode: use all dimensions
+        y_data = clean_series(raw_data) if raw_data.ndim == 1 else raw_data
+        output_dim = y_data.shape[1] if y_data.ndim > 1 else 1
+        print(f"  Data shape: {y_data.shape}")
+        print(f"  Multi-dimensional mode: {output_dim} dimensions")
     else:
-        y_1d = raw_data.flatten()
-    y_1d = clean_series(y_1d)
-
-    print(f"  Data shape: {raw_data.shape if raw_data.ndim > 1 else len(raw_data)}")
-    print(f"  Using dimension: {dim}, Total length: {len(y_1d)}")
+        # Single-dimensional mode: extract one dimension
+        if raw_data.ndim > 1:
+            y_1d = raw_data[:, dim].flatten()
+        else:
+            y_1d = raw_data.flatten()
+        y_data = clean_series(y_1d)
+        output_dim = 1
+        print(f"  Data shape: {raw_data.shape if raw_data.ndim > 1 else len(raw_data)}")
+        print(f"  Using dimension: {dim}, Total length: {len(y_data)}")
 
     # Create lag features
     try:
-        X, y = create_lag_features(y_1d, lags)
+        X, y = create_lag_features(y_data, lags, multidim=use_multidim)
     except ValueError as e:
         print(f"  Error creating features: {e}")
         return None
@@ -339,8 +423,12 @@ def run_comparison(
 
     print(f"  Lags: {lags}, Train: {train_end}, Test: {len(y_test)}")
 
+    # NOTE: No alignment hack applied. Predictions and ground truth are used directly.
+    # The "visual lag" on smooth time series is the autoregressive tracking artifact,
+    # not an indexing bug. Models learn to predict ~y_{t-1} on smooth series.
+
     results = {
-        'y_true': y_test,
+        'y_true': y_test,  # No alignment hack - use y_test directly
         'predictions': {},
         'metrics': {},
         'config': config,
@@ -362,7 +450,24 @@ def run_comparison(
     # 2. S4
     print("\n  [2/6] S4...")
     try:
-        s4 = S4Regressor(lags=lags, epochs=50, device=device, verbose=False, patience=10)
+        # Adaptive parameters based on dataset
+        if dataname == "Toy":
+            # For Toy: use optimized hyperparameters
+            s4 = S4Regressor(
+                lags=lags,
+                d_model=256,     # Larger model capacity
+                n_layers=6,      # Deeper model
+                dropout=0.1,
+                epochs=100,      # More training
+                lr=0.001,
+                device=device,
+                verbose=False,
+                patience=15
+            )
+        else:
+            # Default settings for other datasets
+            s4 = S4Regressor(lags=lags, epochs=50, device=device, verbose=False, patience=10)
+
         s4.fit(X_train_s, y_train_s)
         pred = s4.predict(X_test_s)
         pred = pred * y_std + y_mean
@@ -402,12 +507,26 @@ def run_comparison(
     # 4. GP
     print("\n  [4/6] GP (Sparse)...")
     try:
-        max_train = min(500, len(X_train))
-        gp_lags = min(int(gp_max_lags), lags)
+        # Adaptive parameters based on dataset
+        if dataname == "Toy":
+            # For Toy: use more training data, all lags, and better hyperparameters
+            max_train = min(1000, len(X_train))
+            gp_lags = lags  # Use all lags for Toy
+            gp_inducing = 128
+            gp_iters = 300
+            gp_lr = 0.05
+        else:
+            # For other datasets: use previous settings
+            max_train = min(500, len(X_train))
+            gp_lags = min(int(gp_max_lags), lags)
+            gp_inducing = 64
+            gp_iters = 150
+            gp_lr = 0.01
+
         X_train_gp = X_train_s[-max_train:, -gp_lags:]
         y_train_gp = y_train_s[-max_train:]
         X_test_gp = X_test_s[:, -gp_lags:]
-        gp = GPTorchSparse(lags=gp_lags, num_inducing=64, iters=150, device=device)
+        gp = GPTorchSparse(lags=gp_lags, num_inducing=gp_inducing, iters=gp_iters, lr=gp_lr, device=device)
         gp.fit(X_train_gp, y_train_gp)
         pred = gp.predict(X_test_gp)
         pred = pred * y_std + y_mean
@@ -432,6 +551,7 @@ def run_comparison(
     # 6. DS3M
     print("\n  [6/6] DS3M...")
     try:
+        from experiments.utils.experiments_utils import load_forecast
         ds3m = DS3MWrapper(
             lags=lags,
             problem=dataname,
@@ -443,9 +563,36 @@ def run_comparison(
         ds3m.fit(X, y)
         pred_all = ds3m.predict(X)
         pred = pred_all[train_end:]
+
+        # Handle length mismatch if DS3M returns different length
+        if len(pred) != len(y_test):
+            print(f"    Note: DS3M pred length ({len(pred)}) != y_test ({len(y_test)}), trimming")
+            min_len = min(len(pred), len(y_test))
+            pred = pred[:min_len]
+            y_test_ds3m = y_test[:min_len]
+        else:
+            y_test_ds3m = y_test
+
         results['predictions']['DS3M'] = pred
-        results['metrics']['DS3M'] = compute_metrics(y_test, pred)
-        print(f"    RMSE: {results['metrics']['DS3M']['RMSE']:.4f}")
+
+        # DS3M predicts single dimension, so compare against that dimension only
+        if use_multidim and y_test_ds3m.ndim > 1:
+            y_test_ds3m = y_test_ds3m[:, dim]
+        results['metrics']['DS3M'] = compute_metrics(y_test_ds3m, pred)
+
+        # Also load full-dimensional RMSE from cache (DS3M's original evaluation)
+        cached_forecast = load_forecast(dataname)
+        if cached_forecast and 'res_metric' in cached_forecast:
+            res_metric = cached_forecast['res_metric']
+            if isinstance(res_metric, dict) and 'rmse' in res_metric:
+                full_dim_rmse = float(res_metric['rmse'])
+                results['metrics']['DS3M']['RMSE_full_dim'] = full_dim_rmse
+                print(f"    RMSE (dim={dim}): {results['metrics']['DS3M']['RMSE']:.4f}")
+                print(f"    RMSE (all dims avg): {full_dim_rmse:.4f}")
+            else:
+                print(f"    RMSE: {results['metrics']['DS3M']['RMSE']:.4f}")
+        else:
+            print(f"    RMSE: {results['metrics']['DS3M']['RMSE']:.4f}")
     except Exception as e:
         print(f"    Failed: {e}")
 
@@ -456,6 +603,8 @@ def plot_professional_comparison(results, dataname, plot_range=200):
     """
     Create professional multi-panel comparison plot with comprehensive metrics.
     Each subplot shows one method with RMSE, R2, MAE, MAPE in a text box.
+
+    For multi-dimensional data, plots the average across all dimensions.
     """
     if results is None:
         return None
@@ -468,6 +617,25 @@ def plot_professional_comparison(results, dataname, plot_range=200):
     if len(predictions) == 0:
         print(f"  No predictions for {dataname}")
         return None
+
+    # Handle multi-dimensional data: average across dimensions for plotting
+    if y_true.ndim > 1:
+        y_true_plot = y_true.mean(axis=1)
+        print(f"  Multi-dim data: averaging {y_true.shape[1]} dimensions for plotting")
+    else:
+        y_true_plot = y_true
+
+    # Convert predictions to 1D for plotting
+    predictions_plot = {}
+    for model, pred in predictions.items():
+        if pred.ndim > 1:
+            predictions_plot[model] = pred.mean(axis=1)
+        else:
+            predictions_plot[model] = pred
+
+    # Use plot versions for visualization
+    y_true = y_true_plot
+    predictions = predictions_plot
 
     plot_len = min(plot_range, len(y_true))
     t = np.arange(plot_len)

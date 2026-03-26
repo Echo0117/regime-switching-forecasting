@@ -36,6 +36,15 @@ from experiments.utils.acp_utils import aci_intervals, agaci_intervals, run_othe
 from experiments.utils.experiments_utils import normalize_interval_lengths
 
 
+# Display names for plot titles (internal name -> paper name)
+DISPLAY_NAMES = {
+    'Toy_og': 'Toy',
+}
+
+def _display_name(dataname):
+    return DISPLAY_NAMES.get(dataname, dataname)
+
+
 def run_task3_for_dataset(dataname, args):
     """Run Task 3 UQ analysis for a single dataset."""
     print(f"\n{'='*60}")
@@ -51,8 +60,10 @@ def run_task3_for_dataset(dataname, args):
             self.aci_train_size = args.aci_train_size
             self.alpha = args.alpha
             self.tab_gamma = args.tab_gamma
+            self.aci_gamma = args.aci_gamma
             self.agaci_eta = args.agaci_eta
             self.agaci_lr_schedule = args.agaci_lr_schedule
+            self.agaci_width_penalty = args.agaci_width_penalty
 
     ds3m_args = DS3MArgs()
 
@@ -149,15 +160,21 @@ def run_task3_for_dataset(dataname, args):
     test_size_eff = len(agaci_lower)
 
     # Pad with NaN
-    aci_lower_full = np.full(test_len, np.nan)
-    aci_upper_full = np.full(test_len, np.nan)
     agaci_lower_full = np.full(test_len, np.nan)
     agaci_upper_full = np.full(test_len, np.nan)
-
-    aci_lower_full[T0:T0+test_size_eff] = y_lowers_aci[0]
-    aci_upper_full[T0:T0+test_size_eff] = y_uppers_aci[0]
     agaci_lower_full[T0:T0+test_size_eff] = agaci_lower
     agaci_upper_full[T0:T0+test_size_eff] = agaci_upper
+
+    # Fixed-gamma ACI (no oracle selection — fair comparison with AgACI)
+    gamma_values = gammas_aci[:, 0]
+    best_idx = int(np.argmin(np.abs(gamma_values - args.aci_gamma)))
+    best_gamma_val = float(gamma_values[best_idx])
+    print(f"  ACI fixed gamma: {best_gamma_val}")
+
+    aci_lower_full = np.full(test_len, np.nan)
+    aci_upper_full = np.full(test_len, np.nan)
+    aci_lower_full[T0:T0+test_size_eff] = y_lowers_aci[best_idx]
+    aci_upper_full[T0:T0+test_size_eff] = y_uppers_aci[best_idx]
 
     # Build intervals dict
     intervals_dict = {
@@ -191,8 +208,10 @@ def run_task3_for_dataset(dataname, args):
         results_dict[method_name] = (coverage, median_length)
 
     # Generate plots
+    display = _display_name(dataname)
+
     # 1. Coverage vs Length trade-off
-    plot_tradeoff(results_dict, dataname, OUTPUT_DIR / f"{dataname}_tradeoff.png")
+    plot_tradeoff(results_dict, display, OUTPUT_DIR / f"{dataname}_tradeoff.png")
 
     # 2. Interval length at switches
     plot_length_at_switches(
@@ -476,19 +495,23 @@ def create_summary_table(results):
 def main():
     parser = argparse.ArgumentParser(description="Task 3: UQ Analysis")
     parser.add_argument("--datasets", nargs="+",
-                        default=["Toy", "Sleep", "Unemployment", "Electricity", "Lorenz"],
+                        default=["Toy_og", "Sleep", "Unemployment", "Electricity", "Lorenz"],
                         help="Datasets to process")
     parser.add_argument("--aci-train-size", type=int, default=20,
                         help="ACI calibration window size")
     parser.add_argument("--alpha", type=float, default=0.1,
                         help="Target miscoverage rate (1-alpha = coverage)")
     parser.add_argument("--tab-gamma", type=float, nargs="*",
-                        default=[0.001, 0.01, 0.02, 0.5, 0.99],
-                        help="Gamma values for ACI experts")
+                        default=[0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5],
+                        help="Gamma values for ACI experts (wide grid for diverse experts)")
+    parser.add_argument("--aci-gamma", type=float, default=0.01,
+                        help="Fixed gamma for single-ACI (Gibbs & Candes 2021)")
     parser.add_argument("--agaci-eta", type=float, default=0.5,
                         help="AgACI BOA learning rate")
     parser.add_argument("--agaci-lr-schedule", type=str, default="constant",
                         help="AgACI learning rate schedule")
+    parser.add_argument("--agaci-width-penalty", type=float, default=0.1,
+                        help="Width penalty in IS loss (encourages narrower intervals)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 

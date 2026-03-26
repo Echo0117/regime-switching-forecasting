@@ -78,55 +78,62 @@ def agaci_intervals(
         X, y, args.alpha, args.tab_gamma, basemodel, params_basemodel, args.aci_train_size, args
     )
 
-    # Get ground truth for test period
-    # For DS3M, need to extract from the tail
-    y_full = np.asarray(y)
-    if y_full.ndim > 1:
-        target_dim = int(getattr(args, 'target_dim', 0))
-        y_full = y_full[:, target_dim]
-
-    N = len(y_full)
+    # Get ground truth for test period (must match the scale of expert bounds)
     test_len = y_lowers_experts.shape[1]  # test_size_eff
     T0 = int(args.aci_train_size)
 
-    # For DS3M, we need the tail starting at t0_tail + T0
     if basemodel == "ds3m":
-        from experiments.utils.ds3m_utils import load_ds3m_data
+        # IMPORTANT: Use testOriginal from forecast() — the de-normalized ground truth
+        # that matches the scale of expert bounds from fit_predict_ACPs.
+        # Previously this used ds["data"] which can be in a different (normalized) scale,
+        # causing catastrophic coverage failure for real datasets like Hangzhou.
+        from experiments.utils.ds3m_utils import load_ds3m_data, load_ds3m_model, forecast
+
         ds = load_ds3m_data(args)
-        data_full = np.asarray(ds["data"])
-        if data_full.ndim > 1:
-            target_dim = int(ds.get("target_dim", 0))
-            data_full = data_full[:, target_dim]
+        model = load_ds3m_model(
+            ds["directoryBest"],
+            ds["x_dim"], ds["y_dim"], ds["h_dim"], ds["z_dim"],
+            ds["d_dim"], ds["n_layers"], ds["learning_rate"],
+            ds["device"], bidirection=ds["bidirection"],
+        )
 
-        N_data = len(data_full)
-        ds_test_len = int(ds["test_len"])
-        t0_tail = N_data - ds_test_len
+        _, _, testOriginal, _, _, _, _ = forecast(
+            model,
+            ds["testX"], ds["testY"],
+            ds["moments"], ds["d_dim"],
+            ds["means"], ds["trend"],
+            ds["test_len"], ds["freq"],
+            ds["RawDataOriginal"],
+            remove_mean=ds["remove_mean"],
+            remove_residual=ds["remove_residual"],
+        )
 
-        # Ground truth for evaluation segment
-        y_true_test = data_full[t0_tail + T0: t0_tail + T0 + test_len]
+        y_true_tail = np.asarray(testOriginal, dtype=float)
+        if y_true_tail.ndim == 1:
+            y_true_tail = y_true_tail[:, None]
+
+        target_dim = int(ds.get("target_dim", 0))
+        D = y_true_tail.shape[1]
+        target_dim = max(0, min(target_dim, D - 1))
+
+        y_true_test = y_true_tail[T0:T0 + test_len, target_dim]
     else:
         # For RF/OLS, it's simpler
+        y_full = np.asarray(y)
+        if y_full.ndim > 1:
+            target_dim = int(getattr(args, 'target_dim', 0))
+            y_full = y_full[:, target_dim]
         y_true_test = y_full[T0:T0 + test_len]
 
     # Run AgACI aggregation
-    eta = float(getattr(args, 'agaci_eta', 2))
+    eta = float(getattr(args, 'agaci_eta', 0.1))
     use_gradient = bool(getattr(args, 'agaci_gradient', True))
-    lr_schedule = str(getattr(args, 'agaci_lr_schedule', 'constant'))  # Default to 'constant' for regime-switching
+    lr_schedule = str(getattr(args, 'agaci_lr_schedule', 'constant'))
+    coverage_loss = bool(getattr(args, 'agaci_coverage_loss', True))
+    width_penalty = float(getattr(args, 'agaci_width_penalty', 0.1))
 
-    print(f"\n[ACP_UTILS] Preparing to call AgACI core function")
-    print(f"[ACP_UTILS] Expert intervals shapes:")
-    print(f"[ACP_UTILS]   - y_lowers_experts: {y_lowers_experts.shape}")
-    print(f"[ACP_UTILS]   - y_uppers_experts: {y_uppers_experts.shape}")
-    print(f"[ACP_UTILS]   - y_true_test: {y_true_test.shape}")
-    print(f"[ACP_UTILS] Parameters:")
-    print(f"[ACP_UTILS]   - alpha: {args.alpha}")
-    print(f"[ACP_UTILS]   - eta (learning rate): {eta}")
-    print(f"[ACP_UTILS]   - use_gradient: {use_gradient}")
-    print(f"[ACP_UTILS]   - lr_schedule: {lr_schedule}")
-    print(f"[ACP_UTILS] Expert lower bound ranges:")
-    for i, gamma in enumerate(gammas):
-        print(f"[ACP_UTILS]   - Expert {i} (gamma={gamma[0]:.4f}): "
-              f"[{np.min(y_lowers_experts[i]):.2f}, {np.max(y_lowers_experts[i]):.2f}]")
+    print(f"  [AgACI] experts={y_lowers_experts.shape[0]}, T={y_lowers_experts.shape[1]}, "
+          f"eta={eta}, lr={lr_schedule}, coverage_loss={coverage_loss}")
 
     agaci_results = run_agaci(
         y_lowers_experts,
@@ -136,11 +143,10 @@ def agaci_intervals(
         eta=eta,
         use_gradient=use_gradient,
         lr_schedule=lr_schedule,
-        verbose=True  # Enable verbose mode for detailed BOA trace
+        verbose=False,
+        coverage_loss=coverage_loss,
+        width_penalty=width_penalty,
     )
-
-    print(f"\n[ACP_UTILS] AgACI core function returned")
-    print(f"[ACP_UTILS] Results keys: {list(agaci_results.keys())}")
 
     # Add expert information to results
     agaci_results['y_lowers_experts'] = y_lowers_experts
